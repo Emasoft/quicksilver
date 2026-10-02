@@ -138,10 +138,20 @@ function resolveProvider(flags) {
   }
 }
 
+// A model id belongs to one provider: OpenRouter ids are "vendor/model", TypeSafe ids have no "/". A
+// QUICKSILVER_MODEL or saved model meant for the other provider (e.g. left over after OPENROUTER_API_KEY switched
+// the provider) is skipped with a warning instead of being sent and rejected. An explicit --model is used as given.
 function modelName(flags) {
+  if (flags.model) return flags.model;
   const cfg = readConfig();
-  const cfgModel = (cfg.provider || 'typesafe') === PROVIDER ? cfg.model : undefined;
-  return flags.model || process.env.QUICKSILVER_MODEL || cfgModel || PROVIDERS[PROVIDER].model;
+  const fits = (m) => m.includes('/') === (PROVIDER === 'openrouter');
+  const candidates = [['QUICKSILVER_MODEL', process.env.QUICKSILVER_MODEL], ['saved model', (cfg.provider || 'typesafe') === PROVIDER ? cfg.model : undefined]];
+  for (const [src, m] of candidates) {
+    if (!m) continue;
+    if (fits(m)) return m;
+    process.stderr.write(`quicksilver: warning: ignoring ${src} "${m}": not a ${PROVIDER} model id\n`);
+  }
+  return PROVIDERS[PROVIDER].model;
 }
 
 function recordStats(run) {
