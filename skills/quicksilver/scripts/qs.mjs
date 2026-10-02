@@ -1273,9 +1273,9 @@ PROVIDERS  ~/.quicksilver/providers.json ($QUICKSILVER_HOME/providers.json;
         "api_key": "$OPENROUTER_API_KEY"}, {"name": "typesafe"}, ...]}.
         Built-in, in this default order: openrouter, typesafe, compatible
         (needs a base_url), cloudflare (Workers AI; also needs
-        CLOUDFLARE_ACCOUNT_ID), vercel (AI Gateway). The file's entries come
-        first, in file order,
-        then the built-ins it does not name. "api_key" is "$VAR", "\${VAR}",
+        CLOUDFLARE_ACCOUNT_ID), vercel (AI Gateway). With a file, its entries
+        are the whole chain, in file order: a built-in it does not name is
+        never used. "api_key" is "$VAR", "\${VAR}",
         a literal key (file must be chmod 600), or an array of these; a
         provider whose key is unset is skipped. "enabled": false (or no,
         off, 0, disabled, inactive) turns one off. A request that fails on a
