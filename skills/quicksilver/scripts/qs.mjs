@@ -68,6 +68,8 @@ function checkNums(flags) {
   }
 }
 const num = (v, d) => v ?? d; // v is already a checked number (checkNums) or undefined
+// Malformed user JSON is a usage error (exit 1), not an "unexpected error" stack with exit 5 (audit m4).
+const parseJson = (text, what) => { try { return JSON.parse(text); } catch (e) { return die(`${what} is not valid JSON: ${e.message}`); } };
 const estTokens = (s) => Math.ceil(s.length / 4);
 const rel = (p) => path.relative(process.cwd(), p).split(path.sep).join('/') || '.';
 const clip = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
@@ -236,18 +238,16 @@ function collect(pos, flags) {
 
   if (flags.items) {
     const raw = flags.items === '-' ? readStdin() : fs.readFileSync(flags.items, 'utf8');
-    raw.split(/\r?\n/).forEach((line, i) => {
-      if (!line.trim()) return;
-      try {
-        const o = JSON.parse(line);
-        if (o && typeof o === 'object' && !Array.isArray(o)) {
-          const { id, text, content, ...rest } = o;
-          const body = text ?? content ?? JSON.stringify(rest);
-          return push(String(id ?? i + 1), typeof body === 'string' ? body : JSON.stringify(body));
-        }
-      } catch {}
-      push(String(i + 1), line);
-    });
+    for (const [i, line] of raw.split(/\r?\n/).entries()) {
+      if (!line.trim()) continue;
+      // A line that opens an object must be valid JSON: falling back to plain text (as before) silently
+      // sent a broken record as text. Lines not starting with { are plain items, as documented.
+      if (line.trimStart().startsWith('{')) {
+        const { id, text, content, ...rest } = parseJson(line, `--items line ${i + 1}`);
+        const body = text ?? content ?? JSON.stringify(rest);
+        push(String(id ?? i + 1), typeof body === 'string' ? body : JSON.stringify(body));
+      } else push(String(i + 1), line);
+    }
   }
 
   const files = [];
@@ -412,7 +412,7 @@ async function cmdFilter({ pos, flags }) {
 function parseLabels(flags) {
   if (flags['labels-json']) {
     const raw = String(flags['labels-json']);
-    return JSON.parse(raw.startsWith('@') ? fs.readFileSync(raw.slice(1), 'utf8') : raw);
+    return parseJson(raw.startsWith('@') ? fs.readFileSync(raw.slice(1), 'utf8') : raw, '--labels-json');
   }
   if (!flags.labels) die('classify needs --labels "a,b,c" or --labels-json \'{"a":"description"}\'');
   return Object.fromEntries(String(flags.labels).split(',').map((s) => s.trim()).filter(Boolean).map((l) => {
@@ -555,7 +555,7 @@ async function cmdAsk({ pos, flags }) {
   let body;
   const first = pos[0];
   if (first && (first === '-' || first.endsWith('.json')) && !flags.state) {
-    body = JSON.parse(first === '-' ? readStdin() : fs.readFileSync(first, 'utf8'));
+    body = parseJson(first === '-' ? readStdin() : fs.readFileSync(first, 'utf8'), first === '-' ? 'ask spec on stdin' : first);
   } else {
     const question = pos.join(' ');
     if (!question) die('usage: ask "<question>" --state @file|text|- [--choice "a,b" | --score "low|mid|high"]  or  ask spec.json');
