@@ -72,7 +72,13 @@ if (cmd === 'install') {
       if (run(['setup', ...providerArgs]) !== 0) console.log(`\nNo key saved. Run later: ${NPX} setup (add --provider NAME to choose a provider)`);
     } else {
       const h = hint();
-      console.log(`\nNext: export ${(h.vars.length ? h.vars : allVars).join(' or ')}${h.key_url ? ` (key from ${h.key_url})` : ''} in your shell profile; Quicksilver detects it. Without one, run: ${NPX} setup (add --provider NAME to choose a provider). Providers and their order: ${path.join(HOME, 'providers.json')} (example: ${path.join(DEST, 'providers.example.json')})`);
+      // Unpinned, any chain provider's key works, so name them all in chain order: naming only the head read as
+      // "OpenRouter only" to a user holding a TypeSafe, Cloudflare or Vercel key. Pinned, only that provider's.
+      const per = (p) => `${p.vars.join(' or ')}${p.acct?.length ? `, plus ${p.acct.join(' or ')}` : ''}${p.key_url ? ` (key from ${p.key_url})` : ''}`;
+      const what = pin || !h.chain.length
+        ? `export ${h.vars.length ? per(h) : allVars.join(' or ')} in your shell profile; Quicksilver detects it.`
+        : `export one provider's key in your shell profile; Quicksilver detects it and tries them in this order: ${h.chain.map((p) => `${p.name}: ${per(p)}`).join('; ')}.`;
+      console.log(`\nNext: ${what} Without one, run: ${NPX} setup (add --provider NAME to choose a provider). Providers and their order: ${path.join(HOME, 'providers.json')} (example: ${path.join(DEST, 'providers.example.json')})`);
     }
   } else run(['status', ...providerArgs]);
   console.log(`\n${c('32', 'Done.')} Restart Claude Code (or start a new session). Claude now delegates bulk judgment calls to Jev automatically.`);

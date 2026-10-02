@@ -1453,7 +1453,10 @@ function installHint(pin) {
   const b = pin && !all.some((x) => x.name === pin) && BUILTINS.find((x) => x.name === pin);
   const t = pin ? (b ? prepare(checkEntry({ ...b }, `built-in provider "${b.name}"`)) : all.find((x) => x.name === pin)) : all.find((x) => x.enabled && x.base_url);
   const ready = (pin ? [t] : all).find((p) => p?.state === 'ready');
-  return { name: t?.name, vars: t ? varNames(t.api_key) : [], key_url: t?.key_url, exported: ready?.keySource.startsWith('$') ? ready.keySource.slice(1) : null };
+  // `chain` is every provider the unpinned chain can use, in order, with the variables to export: an unpinned hint
+  // naming only the head reads as "this provider only" to a user who holds another provider's key.
+  const chain = all.filter((p) => p.enabled && p.base_url).map((p) => ({ name: p.name, vars: varNames(p.api_key), acct: p.path.includes('{account_id}') ? varNames(p.account_id) : [], key_url: p.key_url })).filter((p) => p.vars.length);
+  return { name: t?.name, vars: t ? varNames(t.api_key) : [], key_url: t?.key_url, exported: ready?.keySource.startsWith('$') ? ready.keySource.slice(1) : null, chain };
 }
 
 // Read by the docs tests (tests/docs.test.mjs) to check HELP, README.md and SKILL.md against the code, and by the

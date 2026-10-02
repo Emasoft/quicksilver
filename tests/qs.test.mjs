@@ -574,6 +574,34 @@ describe('installer exit codes', () => {
     assert.doesNotMatch(r.stdout, /~\/\.quicksilver/);
   });
 
+  test('install with no key, no pin and no TTY names every chain provider\'s variables, in chain order', async () => {
+    // A user holding only a Cloudflare or Vercel key must not read the hint as OpenRouter-only.
+    const { BUILTINS, varNames } = await import('../skills/quicksilver/scripts/qs.mjs');
+    const noKeys = Object.fromEntries(BUILTINS.flatMap((b) => varNames(b.api_key)).map((n) => [n, undefined]));
+    writeProviders(BUILTINS.map((b) => ({ name: b.name }))); // the built-in chain; compatible has no URL, so it is not in it
+    const r = await install(['install'], { ...noKeys, QUICKSILVER_PROVIDER: undefined });
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    const line = r.stdout.split('\n').find((l) => l.startsWith('Next:')) ?? '';
+    const inChain = BUILTINS.filter((b) => b.base_url);
+    let at = -1;
+    for (const b of inChain) {
+      const i = line.indexOf(`${b.name}: ${varNames(b.api_key).join(' or ')}`);
+      assert.ok(i > at, `${b.name} missing or out of order in: ${line}`);
+      if (b.key_url) assert.ok(line.includes(b.key_url), `${b.key_url} missing in: ${line}`);
+      at = i;
+    }
+    assert.ok(!line.includes('JEV_GATEWAY_API_KEY'), line);
+    assert.match(line, /add --provider NAME to choose a provider/);
+  });
+
+  test('a rejected --key does not claim a key of a provider outside providers.json is still in use', async () => {
+    verifyStatus = 401; // providers.json lists only typesafe (beforeEach); OPENROUTER_API_KEY is exported but unused
+    const r = await install(['install', '--key', 'k-bad'], { JEV_API_KEY: undefined, OPENROUTER_API_KEY: 'k-or', QUICKSILVER_PROVIDER: undefined });
+    assert.equal(r.code, 3, r.stdout + r.stderr);
+    assert.match(r.stderr, /Setup failed: the key was not saved/);
+    assert.doesNotMatch(r.stderr, /OPENROUTER_API_KEY|still in use/);
+  });
+
   test('uninstall exits 0 and names the real QUICKSILVER_HOME', async () => {
     const r = await install(['uninstall']);
     assert.equal(r.code, 0, r.stderr);
