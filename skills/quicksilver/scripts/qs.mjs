@@ -34,7 +34,7 @@ const LOCK_RE = /(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Carg
 
 function parseArgs(argv) {
   const pos = [], flags = {};
-  const bools = new Set(['lines', 'json', 'all', 'remove', 'help', 'fast', 'verbose', 'no-collapse', 'no-secrets-guard']);
+  const bools = new Set(['lines', 'json', 'all', 'remove', 'help', 'fast', 'verbose', 'no-collapse', 'no-secrets-guard', 'follow-symlinks']);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--') { pos.push(...argv.slice(i + 1)); break; }
@@ -224,29 +224,47 @@ function gitFiles(dir) {
   } catch { return null; }
 }
 
-function walk(dir, acc = []) {
+function walk(dir, acc = [], follow = false, visited = new Set()) {
+  if (follow) {
+    // A followed link can point back up the tree: walk each real directory once, so loops terminate.
+    const real = fs.realpathSync(dir);
+    if (visited.has(real)) return acc;
+    visited.add(real);
+  }
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (e.isDirectory()) { if (!IGNORE_DIRS.has(e.name) && !e.name.startsWith('.')) walk(path.join(dir, e.name), acc); }
-    else if (e.isFile()) acc.push(path.join(dir, e.name));
+    const p = path.join(dir, e.name);
+    let st = e; // without follow a link is neither file nor directory, so it is never read
+    if (follow && e.isSymbolicLink()) { try { st = fs.statSync(p); } catch { acc.push(p); continue; } } // broken: collect() reports it
+    if (st.isDirectory()) { if (!IGNORE_DIRS.has(e.name) && !e.name.startsWith('.')) walk(p, acc, follow, visited); }
+    else if (st.isFile()) acc.push(p);
   }
   return acc;
 }
 
-// A symlink is returned as-is (lstat, not stat) so collect() reports it instead of following it:
-// stat would read the target, e.g. notes.txt -> ~/.aws/credentials from inside the repo.
-const fileOrLink = (f) => { try { const st = fs.lstatSync(f); return st.isFile() || st.isSymbolicLink(); } catch { return false; } };
+// One path from a glob, a git listing or the command line, to the files it stands for. By default a symlink is
+// returned as-is (lstat, not stat) so collect() reports it instead of reading it: stat would read the target,
+// e.g. notes.txt -> ~/.aws/credentials from inside the repo (audit M1). With --follow-symlinks a link to a
+// file is kept and a link to a directory is walked (outside git, so without .gitignore).
+function entries(f, follow) {
+  let st;
+  try { st = fs.lstatSync(f); } catch { return []; }
+  if (st.isFile()) return [f];
+  if (!st.isSymbolicLink()) return [];
+  if (!follow) return [f];
+  try { st = fs.statSync(f); } catch { return [f]; } // broken link: collect() reports it
+  return st.isDirectory() ? walk(f, [], true) : st.isFile() ? [f] : [];
+}
 
-function expand(spec) {
+function expand(spec, follow) {
   if (/[*?[\]{}]/.test(spec)) {
     if (!fs.globSync) die('glob patterns need Node 22+; pass a directory instead');
-    return fs.globSync(spec, { exclude: (p) => IGNORE_DIRS.has(path.basename(p)) }).filter(fileOrLink);
+    return fs.globSync(spec, { exclude: (p) => IGNORE_DIRS.has(path.basename(p)) }).flatMap((f) => entries(f, follow));
   }
   if (!fs.existsSync(spec)) die(`no such file or directory: ${spec}`);
-  const st = fs.lstatSync(spec);
-  if (st.isFile() || st.isSymbolicLink()) return [spec];
+  if (!fs.lstatSync(spec).isDirectory()) return entries(spec, follow);
   // Walk only outside git (null). An empty list means "inside git, everything ignored": walking it
   // would send exactly the gitignored files .gitignore is documented to keep out (audit m1).
-  return (gitFiles(spec) ?? walk(spec)).filter(fileOrLink);
+  return (gitFiles(spec) ?? walk(spec, [], follow)).flatMap((f) => entries(f, follow));
 }
 
 function readText(file, maxBytes) {
@@ -314,22 +332,31 @@ function collect(pos, flags) {
     }
   }
 
+  const follow = Boolean(flags['follow-symlinks']) || process.env.QUICKSILVER_FOLLOW_SYMLINKS === '1';
   const files = [];
   for (const spec of pos) {
     if (spec === '-') { const t = readStdin(); flags.lines ? pushLines('stdin', t) : push('stdin', t); continue; }
-    files.push(...expand(spec));
+    files.push(...expand(spec, follow));
   }
   const seen = new Set();
   for (const f of files) {
     const abs = path.resolve(f);
-    if (seen.has(abs)) continue;
-    seen.add(abs);
     const r = rel(abs);
     if (exts && !exts.includes(path.extname(f).toLowerCase())) continue;
-    // Never follow a symlink, wherever it came from (git listing, glob, explicit path): its target can
-    // sit outside the input tree, and SECRET_RE only sees the link's own name.
-    if (fs.lstatSync(abs).isSymbolicLink()) { skipped.push(`${r} (symlink, never followed)`); continue; }
-    if (!flags['no-secrets-guard'] && SECRET_RE.test(r)) { skipped.push(`${r} (secret-like, never sent)`); continue; }
+    let real = abs;
+    if (follow) {
+      // Followed: dedupe by target, and the secret guard below also checks the target's own path,
+      // since a link named notes.txt can point at ~/.ssh/id_rsa.
+      try { real = fs.realpathSync(abs); } catch { skipped.push(`${r} (broken symlink)`); continue; }
+    } else if (fs.lstatSync(abs).isSymbolicLink()) {
+      // Not followed, wherever it came from (git listing, glob, explicit path): the target can sit outside
+      // the input tree, and SECRET_RE would only see the link's own name.
+      skipped.push(`${r} (symlink, never followed)`);
+      continue;
+    }
+    if (seen.has(real)) continue;
+    seen.add(real);
+    if (!flags['no-secrets-guard'] && (SECRET_RE.test(r) || (real !== abs && SECRET_RE.test(real)))) { skipped.push(`${r} (secret-like, never sent)`); continue; }
     if (LOCK_RE.test(r)) continue;
     const text = readText(abs, MAX_BYTES);
     if (text === null) { skipped.push(`${r} (binary or >2MB)`); continue; }
@@ -728,6 +755,8 @@ OPTIONS
           --max-chars 60000   truncate each item (marked ~ in the output)
           --limit 5000        refuse to run on more items than this
           --no-secrets-guard  also send secret-looking files
+          --follow-symlinks   read symlink targets (default: skip and list them);
+                              the secret guard also checks the target's path
  output   --json              JSON on stdout, receipt on stderr
           --save FILE         every per-item result to FILE (filter, classify)
           --top N | --all     rank: show N (10) or all; find: show N (5)
@@ -757,6 +786,7 @@ ENVIRONMENT
   QUICKSILVER_MODEL     model, used when --model is absent
   QUICKSILVER_API_BASE  typesafe-only API base URL (proxies)
   QUICKSILVER_HOME      config + stats directory (default ~/.quicksilver)
+  QUICKSILVER_FOLLOW_SYMLINKS=1  same as --follow-symlinks
 
 EXIT CODES  0 ok · 1 usage/input error · 3 key missing, rejected or out of
             credits (re-run setup) · 4 request rejected · 5 request failed
