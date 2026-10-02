@@ -47,6 +47,9 @@ a task looks like "read a lot to decide a little".
 # pass the key non-interactively (CI, dotfiles)
 npx github:UditAkhourii/quicksilver install --key YOUR_JEV_KEY
 
+# use an OpenRouter key instead
+npx github:UditAkhourii/quicksilver setup YOUR_OPENROUTER_KEY --provider openrouter
+
 # as a Claude Code plugin
 /plugin marketplace add UditAkhourii/quicksilver
 /plugin install quicksilver@quicksilver
@@ -55,7 +58,7 @@ npx github:UditAkhourii/quicksilver install --key YOUR_JEV_KEY
 git clone https://github.com/UditAkhourii/quicksilver && cd quicksilver && ./install.sh   # or .\install.ps1
 ```
 
-`JEV_API_KEY` or `TYPESAFE_API_KEY` in your environment also works. Needs Node 18+.
+`JEV_API_KEY`, `TYPESAFE_API_KEY` or `OPENROUTER_API_KEY` in your environment also works. Needs Node 18+.
 No npm dependencies.
 </details>
 
@@ -155,7 +158,8 @@ a vibe.
 
 - It never sends `.env*`, private keys, certificates, or credentials files. It
   respects `.gitignore`, and skips binaries and files over 2 MB.
-- Content goes to TypeSafe's API (`api.typesafe.ai`). TypeSafe states that Jev
+- Content goes to TypeSafe's API (`api.typesafe.ai`) or, with the openrouter
+  provider, through openrouter.ai, whose own data and logging policy then applies. TypeSafe states that Jev
   is not trained on customer data. Don't point it at anything you can't send to
   a third party.
 - The key is stored in `~/.quicksilver/config.json` with user-only permissions.

@@ -32,10 +32,12 @@ Run `qs status` first.
   2. keep it out of the chat by running `node "<skill dir>/scripts/qs.mjs" setup`
      in their own terminal. It prompts for the key with hidden input.
 
-  `JEV_API_KEY` or `TYPESAFE_API_KEY` in the environment also works, and takes precedence.
+  Env keys (`JEV_API_KEY`/`TYPESAFE_API_KEY` for typesafe, `OPENROUTER_API_KEY` for openrouter) also work and take precedence over the saved key of the same provider. The provider is chosen by `--provider`, then `QUICKSILVER_PROVIDER`, then automatically openrouter whenever `OPENROUTER_API_KEY` is set, then the one saved by setup, then typesafe.
+  An OpenRouter key works too: `qs setup <KEY> --provider openrouter` (key from
+  https://openrouter.ai/settings/keys), or `OPENROUTER_API_KEY` in the environment.
   After setup, carry on with the original task. Don't stop at "configured".
 
-Exit code 3 means a key problem: missing, or rejected by Jev. Re-run setup.
+Exit code 3 means a key problem: missing, rejected, or out of credits. Re-run setup.
 
 ## When to delegate
 

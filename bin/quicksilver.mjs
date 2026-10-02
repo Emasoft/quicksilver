@@ -29,14 +29,15 @@ if (cmd === 'install') {
   console.log(`${c('36', '☿ quicksilver')} skill installed → ${DEST}`);
 
   const keyFlag = rest.find((a) => a.startsWith('--key='))?.slice(6) || (rest.includes('--key') ? rest[rest.indexOf('--key') + 1] : '');
+  const providerArgs = rest.flatMap((a, i) => (a === '--provider' ? [a, rest[i + 1]] : a.startsWith('--provider=') ? [a] : []));
   const ready = spawnSync(process.execPath, [QS, 'status'], { stdio: 'ignore' }).status === 0;
-  if (keyFlag) run(['setup', keyFlag]);
+  if (keyFlag) run(['setup', keyFlag, ...providerArgs]);
   else if (!ready) {
     if (process.stdin.isTTY) {
-      console.log(`\nOne-time setup: paste your Jev API key (create one at ${c('4', 'https://console.typesafe.ai')}).`);
-      if (run(['setup']) !== 0) console.log(`\nNo key saved. Run later: npx github:UditAkhourii/quicksilver setup`);
+      console.log(`\nOne-time setup: paste your Jev API key (create one at ${c('4', 'https://console.typesafe.ai')}), or an OpenRouter key with --provider openrouter (https://openrouter.ai/settings/keys).`);
+      if (run(['setup', ...providerArgs]) !== 0) console.log(`\nNo key saved. Run later: npx github:UditAkhourii/quicksilver setup`);
     } else {
-      console.log(`\nNext: set your Jev key once →  npx github:UditAkhourii/quicksilver setup   (key from https://console.typesafe.ai)`);
+      console.log(`\nNext: set your Jev key once →  npx github:UditAkhourii/quicksilver setup   (key from https://console.typesafe.ai; an OpenRouter key works too via --provider openrouter, key from https://openrouter.ai/settings/keys)`);
     }
   } else run(['status']);
   console.log(`\n${c('32', 'Done.')} Restart Claude Code (or start a new session). Claude now delegates bulk judgment calls to Jev automatically.`);
