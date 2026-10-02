@@ -1,10 +1,10 @@
 ---
 trdd-id: SKILHPWU
 title: Configurable providers via providers.json
-column: dev
+column: human_review
 status: tasked
 created: 2026-10-02T07:55:46+0200
-updated: 2026-10-02T07:56:51+0200
+updated: 2026-10-02T08:28:22+0200
 current-owner: main-agent@quicksilver
 created-by: main-agent@quicksilver
 task-type: feature
@@ -15,6 +15,7 @@ mandated-by: none
 approved: true
 approval-judge: main-agent@quicksilver
 approval-datetime: 2026-10-02T07:55:46+0200
+implementation-commits: [7956979, 0756a7c, fc075dd, 8c9ff26, d196d2d, 72e77e9, 0c50ccd, aa05fcd]
 ---
 
 # Configurable providers via providers.json
@@ -91,7 +92,20 @@ Provider configuration moves into one git-free, user-owned file, `~/.quicksilver
 
 ### --max-bytes
 
-`--max-bytes N` (or `QUICKSILVER_MAX_BYTES`) replaces the 2 MB per-item, stdin and `--items` cap.
+User, verbatim (2026-10-02, supersedes the line that was here): "remove the input limit, make it opt-in only if --max-bytes is used. otherwise both tools must read any file size. add an hard limit of 100MB just to prevent system hungs."
+
+- No default cap: any file, stdin stream or `--items` file is read, up to a fixed 100 MB (104857600 bytes) per input that cannot be raised.
+- `--max-bytes N` (or `QUICKSILVER_MAX_BYTES`, the flag wins) sets a lower opt-in cap; a value above 100 MB exits 1. An over-the-cap file is listed as skipped; an over-the-cap stdin or `--items` file exits 1 naming the cap.
+
+### Chunking (replaces --max-chars)
+
+User, verbatim (2026-10-02): "max char is for jev context limit? it should still process any amount of chars, but just chunk them into jev context appropriate sized chunks to avoid overflowing the context size."
+User, verbatim (2026-10-02, overrides any averaging): "cutting short is bad. it should chunk the files in parts and evaluate those parts separatedly, and if the command was a per file judgement, it should consider the higest scored chunk to decide if the file passes or not or to give a rating."
+
+- Nothing sent to Jev is truncated. An item longer than `--chunk-chars N` (or `QUICKSILVER_CHUNK_CHARS`; 1000-90000, default 60000, sized for Jev's 32k-token context) is split at line ends (hard split only inside one over-long line) with a 500-char overlap. `--max-chars` is removed, with no alias.
+- Each chunk is its own request (packing still applies to small units). The highest-scoring chunk decides: filter and ask yes/no by the highest probability, rank and ask --score by the highest score, classify and ask --choice by the most confident chunk (ties: the earliest). The deciding chunk is reported: `(N chunks, best lines A-B)` in text, `chunks` / `best_lines` in JSON.
+- find sends whole lines (no 400-char clip); a line longer than a chunk is split into numbered pieces, and each request holds at most `--chunk` lines and `--chunk-chars` chars.
+- ask chunks a string state the same way; a JSON object/array state larger than a chunk is split into groups of whole top-level entries, and one entry larger than a chunk exits 1.
 
 ### Example file
 
