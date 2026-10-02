@@ -1281,10 +1281,16 @@ PROVIDERS  ~/.quicksilver/providers.json ($QUICKSILVER_HOME/providers.json;
         off, 0, disabled, inactive) turns one off. A request that fails on a
         rejected key, no credits, an unavailable model, 429 or 5xx/network
         after retries moves to the next provider (never on a 400/422), and
-        the receipt says so; each error is logged to errors.log next to
-        providers.json (kept 72 hours, keys masked). Run status to see the
-        chain. Example with every field: providers.example.json in the
-        skill folder (one level above this script).
+        the receipt says so; the failed provider is skipped for the rest of
+        the run. Until a provider has answered once, the run's other requests
+        wait for its first one, so a bad key costs one request, not one per
+        item. If every provider fails, each failure is listed (exit 3 if any
+        was a key or credit problem). --provider NAME pins one provider, no
+        fallback; with a file, NAME must be one of its entries. Each error is
+        logged to errors.log next to providers.json (kept 72 hours, keys
+        masked). Run status to see the chain. Example with every field:
+        providers.example.json in the skill folder (one level above this
+        script).
 
 OPTIONS
  input    --lines             each non-empty line is an item (logs, lists)

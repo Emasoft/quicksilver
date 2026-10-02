@@ -22,14 +22,19 @@ Needs Node 18+ (globs need Node 22+). There are no other dependencies.
 
 ## First run: the key
 
-Run `qs status` first. It lists the providers in the order they are tried
-(openrouter, typesafe, compatible, cloudflare, vercel by default), each with
-its state.
+Run `qs status` first. It lists the providers in the order they are tried,
+each with its state. When `~/.quicksilver/providers.json` exists, that order is
+exactly its entries in file order (a built-in it does not name is never used);
+without the file it is openrouter, typesafe, compatible, cloudflare, vercel.
 
 - Any line saying `ready` means go straight to the task. If a request fails on
   one provider (rejected key, no credits, model unavailable, rate limit, server
   error), Quicksilver retries it on the next provider by itself; the receipt
   says `fell back N×` and why, and `~/.quicksilver/errors.log` has the details.
+  A provider that fails is skipped for the rest of the run, and until a
+  provider has answered once the other requests wait for its first one, so a
+  bad key costs one request, not one per item. If every provider fails, the
+  error lists each failure (exit 3 if any was a key or credit problem).
 - Every line saying `key missing` (exit 3) means no key was found. Never ask the
   user to paste a key into the chat. The preferred fix: the user exports it in
   their shell profile, where Quicksilver detects it, then restarts Claude Code
@@ -42,7 +47,8 @@ its state.
   to `~/.quicksilver/providers.json` (user-only permissions).
 - The order, disabled providers, saved keys and custom endpoints live in
   `~/.quicksilver/providers.json` (example: `<skill dir>/providers.example.json`).
-  `--provider NAME` uses one provider only, with no fallback. If a command says
+  `--provider NAME` uses one provider only, with no fallback; when the file
+  exists, NAME must be one of its entries. If a command says
   `config.json is no longer read`, tell the user what it says to move; don't
   edit their files.
 

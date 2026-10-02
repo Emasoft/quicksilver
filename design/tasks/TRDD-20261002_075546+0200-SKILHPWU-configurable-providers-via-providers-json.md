@@ -4,7 +4,7 @@ title: Configurable providers via providers.json
 column: human_review
 status: tasked
 created: 2026-10-02T07:55:46+0200
-updated: 2026-10-02T08:28:22+0200
+updated: 2026-10-02T08:45:03+0200
 current-owner: main-agent@quicksilver
 created-by: main-agent@quicksilver
 task-type: feature
@@ -46,7 +46,7 @@ Provider configuration moves into one git-free, user-owned file, `~/.quicksilver
 
 - Location: only `$QUICKSILVER_HOME/providers.json` (must be an absolute path) or `~/.quicksilver/providers.json`. Never the working directory, a project directory or `./.env`. A missing file means the built-in chain.
 - Top level: `version` (must be 1) and `providers` (array). Any other key is an error.
-- Chain: the file's entries in file order, then every built-in the file does not name, in built-in order. Built-in order: openrouter, typesafe, compatible, cloudflare, vercel. An entry whose name is a built-in overrides that built-in field by field; any other name adds a provider and must give `base_url`, `path`, `adapter`, `api_key` and `model`.
+- Chain: when providers.json exists, exactly its entries in file order; a built-in the file does not name is never used. Without the file, the built-in chain: openrouter, typesafe, compatible, cloudflare, vercel. An entry whose name is a built-in takes that built-in as defaults and overrides that built-in field by field; any other name adds a provider and must give `base_url`, `path`, `adapter`, `api_key` and `model`.
 - Entry fields (unknown field = error):
   - `name` — `^[a-z][a-z0-9-]{1,31}$`, unique.
   - `enabled` — absent = enabled. true-set: JSON true, 1, and case-insensitive "true", "enabled", "enable", "1", "yes", "y", "active", "on". false-set: JSON false, 0, "false", "disabled", "disable", "0", "no", "n", "inactive", "off". Anything else is an error naming the provider and the value.
@@ -69,7 +69,9 @@ Provider configuration moves into one git-free, user-owned file, `~/.quicksilver
 
 - A provider is skipped silently (not an error, not logged) when disabled, when its key resolves to nothing, when its account id resolves to nothing, or when it has no `base_url`.
 - Per request: on 401/403, 402 or an "insufficient credits" body, model unavailable (404, or a 400/422 body naming an unknown or unavailable model), 429 and 5xx after retries, a network error after retries, or an unusable response (Cloudflare `success:false`, non-Completed state, answers missing), the request moves to the next provider and the failed provider is skipped for the rest of the run. 400/422 request-shape errors stop the run (exit 4) with no fallback.
-- `--provider X` or `QUICKSILVER_PROVIDER=X` pins X: no fallback; a disabled X is an error (exit 1); X with no key exits 3 naming every variable tried.
+- Per-run circuit breaker: until a provider has answered once in the run, every other request waits for that first request instead of going out in parallel; if it fails, the waiters skip the provider. A rejected key or an empty wallet therefore costs one request and one errors.log line per provider per run, not one per item.
+- When every provider in the chain fails, the error lists each provider's failure (not just the last); the exit code is 3 if any failure was a key or credit problem, else the last failure's code (5 network/5xx, 4 model). A pinned chain of one reports that provider's failure alone.
+- `--provider X` or `QUICKSILVER_PROVIDER=X` pins X: no fallback; with a providers.json, X must be one of its entries (exit 1 otherwise; only `setup --provider X` may add a built-in the file does not name yet); a disabled X is an error (exit 1); X with no key exits 3 naming every variable tried.
 - The old rule "OPENROUTER_API_KEY in the environment auto-selects openrouter" is removed: openrouter is simply first.
 - The run footer names the providers and models that answered, and how many requests fell back, from which provider, and why.
 - `status` lists the chain in order with each entry's state: disabled, key missing (variables tried), not configured, ready, rejected, no credits, unreachable, ready (not verified).

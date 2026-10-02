@@ -215,8 +215,10 @@ a vibe.
 
 ## Providers
 
-Quicksilver reaches Jev through any of five providers. They are tried in
-order: a request that fails on one goes to the next.
+Quicksilver reaches Jev through any of five built-in providers. They are
+tried in order: a request that fails on one goes to the next. Without a
+`providers.json`, the chain is the built-ins in this order: openrouter,
+typesafe, compatible, cloudflare, vercel.
 
 | Provider | Key (environment) | Notes |
 | --- | --- | --- |
@@ -230,8 +232,9 @@ A provider whose key is not set is skipped without a word. To change the
 order, turn a provider off, store a key, or add your own endpoint, write
 `~/.quicksilver/providers.json` (or `$QUICKSILVER_HOME/providers.json`; it is
 never read from the working directory). The `providers` array **is** the
-priority and fallback order; built-ins you don't list keep their default order
-after yours:
+priority and fallback order: when the file exists, the chain is exactly its
+entries, in file order. A built-in you don't list is never used; a built-in you
+do list only supplies defaults for the fields you leave out:
 
 ```json
 {
@@ -266,7 +269,12 @@ A request moves to the next provider when the key is rejected (401/403), the
 credits are gone (402), the model is unavailable, or the provider keeps
 answering 429/5xx (or the network fails) after retries. A 400/422 means the
 request itself is wrong, so it stops the run instead. The failed provider is
-skipped for the rest of the run, and the receipt says so:
+skipped for the rest of the run, and the receipt says so. A per-run circuit
+breaker keeps that cheap: until a provider has answered once, the run's other
+requests wait for that first request instead of all going out in parallel, so a
+rejected key or an empty wallet costs one request and one `errors.log` line,
+not one per item. When every provider fails, the error lists each provider's
+failure, and the exit code is 3 if any of them was a key or credit problem:
 
 ```
 — 40 scanned · 3 matched · 0 borderline · 5.2s · jev 12k tok ($0.0005) · via typesafe (jev-latest) · ~11k Claude tokens not read
@@ -275,8 +283,12 @@ skipped for the rest of the run, and the receipt says so:
 
 Each provider error is written to `~/.quicksilver/errors.log` (time, provider,
 model, error, where it went next; keys masked; entries older than 72 hours are
-dropped). `--provider NAME` (or `QUICKSILVER_PROVIDER`) uses one provider only,
-with no fallback. `qs status` shows the chain and each provider's state:
+dropped). `--provider NAME` (or `QUICKSILVER_PROVIDER`) pins one provider:
+that provider only, with no fallback. With a `providers.json`, NAME must be one
+of its entries (only `setup --provider NAME` may add a built-in the file does
+not name yet); a disabled NAME is an error, and a NAME with no key exits 3
+naming every variable it tried. `qs status` shows the chain and each
+provider's state:
 
 ```
 providers, in fallback order (/Users/you/.quicksilver/providers.json):
