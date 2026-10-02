@@ -109,7 +109,8 @@ function resolveProvider(flags) {
   const cfg = readJson(CONFIG, {});
   const e = process.env;
   // user requirement: an OpenRouter key in the env always wins unless a provider is named explicitly
-  if (flags.provider === true) die('--provider needs a value (typesafe|openrouter)');
+  // `--provider=` (empty) must not fall through to the env/config default silently.
+  if (flags.provider === true || flags.provider === '') die('--provider needs a value (typesafe|openrouter)');
   PROVIDER = flags.provider || e.QUICKSILVER_PROVIDER || (e.OPENROUTER_API_KEY ? 'openrouter' : '') || cfg.provider || 'typesafe';
   if (!PROVIDERS[PROVIDER]) die(`unknown provider "${PROVIDER}" (use ${Object.keys(PROVIDERS).join('|')})`);
   // QUICKSILVER_API_BASE is a TypeSafe-proxy override only: an OPENROUTER_API_KEY in env switches provider
