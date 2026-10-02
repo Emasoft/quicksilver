@@ -25,8 +25,15 @@ main() {
     top=$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null) || die "$DIR exists but is not a git clone; move it or set QUICKSILVER_DEV_DIR"
     [ "$top" = "$(cd "$DIR" && pwd -P)" ] || die "$DIR is inside another repo ($top); set QUICKSILVER_DEV_DIR"
     origin=$(git -C "$DIR" remote get-url origin 2>/dev/null) || die "$DIR has no origin remote"
-    [ "${origin%.git}" = "${URL%.git}" ] || die "$DIR is a clone of $origin, not $URL; refusing to touch it"
+    # An SSH clone of the fork is the same repository as the https one.
+    case "${origin%.git}" in
+      "${URL%.git}" | git@github.com:Emasoft/quicksilver | ssh://git@github.com/Emasoft/quicksilver) ;;
+      *) die "$DIR is a clone of $origin, not $URL; refusing to touch it" ;;
+    esac
     [ -z "$(git -C "$DIR" status --porcelain)" ] || die "$DIR has local changes; commit or stash them first"
+    # pull --ff-only updates whatever branch is checked out; the installer only ever means main.
+    branch=$(git -C "$DIR" symbolic-ref --short -q HEAD) || branch=""
+    [ "$branch" = main ] || die "$DIR is not on main (it is on ${branch:-a detached HEAD}); run: git -C \"$DIR\" checkout main"
     run git -C "$DIR" pull --ff-only
   else
     run git clone "$URL" "$DIR"
