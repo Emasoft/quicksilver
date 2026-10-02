@@ -254,8 +254,8 @@ function checkLegacyConfig() {
   ];
   die(`${LEGACY_CONFIG} is no longer read; settings and keys now live in ${PROVIDERS_FILE}.\n`
     + `  Move: ${moves.join('; ') || 'nothing (it holds no settings)'}.\n`
-    + `  Example: {"version": 1, "providers": [{"name": "${owner}", "api_key": "<your key>"}]} (then chmod 600 it),\n`
-    + '  or delete config.json and run setup again. Then delete config.json.');
+    + `  Example: {"version": 1, "providers": [{"name": "${owner}", "api_key": "<your key>"}]} (then chmod 600 it).\n`
+    + '  Then delete config.json. (Or delete it now and run setup again.)');
 }
 
 // The file as written (for setup) or null. Reading it checks the location rules and the JSON, not the schema.
@@ -1229,7 +1229,9 @@ PROVIDERS  ~/.quicksilver/providers.json ($QUICKSILVER_HOME/providers.json;
         order: {"version": 1, "providers": [{"name": "openrouter",
         "api_key": "$OPENROUTER_API_KEY"}, {"name": "typesafe"}, ...]}.
         Built-in, in this default order: openrouter, typesafe, compatible
-        (needs a base_url). The file's entries come first, in file order,
+        (needs a base_url), cloudflare (Workers AI; also needs
+        CLOUDFLARE_ACCOUNT_ID), vercel (AI Gateway). The file's entries come
+        first, in file order,
         then the built-ins it does not name. "api_key" is "$VAR", "\${VAR}",
         a literal key (file must be chmod 600), or an array of these; a
         provider whose key is unset is skipped. "enabled": false (or no,
@@ -1238,8 +1240,8 @@ PROVIDERS  ~/.quicksilver/providers.json ($QUICKSILVER_HOME/providers.json;
         after retries moves to the next provider (never on a 400/422), and
         the receipt says so; each error is logged to errors.log next to
         providers.json (kept 72 hours, keys masked). Run status to see the
-        chain. Example with every field: providers.example.json next to
-        this script's folder.
+        chain. Example with every field: providers.example.json in the
+        skill folder (one level above this script).
 
 OPTIONS
  input    --lines             each non-empty line is an item (logs, lists)
@@ -1278,6 +1280,9 @@ ENVIRONMENT
   OPENROUTER_API_KEY    openrouter key (built-in "$OPENROUTER_API_KEY")
   JEV_API_KEY, TYPESAFE_API_KEY  typesafe key
   JEV_GATEWAY_API_KEY   compatible key (with a base_url in providers.json)
+  CLOUDFLARE_API_TOKEN (or JEV_CLOUDFLARE_API_TOKEN) + CLOUDFLARE_ACCOUNT_ID
+                        cloudflare token and account
+  AI_GATEWAY_API_KEY    vercel key
   QUICKSILVER_PROVIDER  same as --provider
   QUICKSILVER_MODEL     model, used when --model is absent
   QUICKSILVER_HOME      providers.json + stats directory, absolute path
@@ -1300,7 +1305,7 @@ EXAMPLES
   qs ask "Does this contract allow termination without notice?" --state @c.txt
   qs ask "How severe is this?" --state @incident.md --score "minor|major|fatal"
   qs filter "Does this file build SQL from user input?" src --json
-  qs status --provider openrouter
+  qs status
 
 USE CASES
   which files handle X?   filter    │  security review shortlist   filter

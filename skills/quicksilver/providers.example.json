@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "providers": [
+    { "name": "openrouter", "enabled": true, "api_key": "$OPENROUTER_API_KEY" },
+    { "name": "typesafe", "enabled": true, "api_key": ["$JEV_API_KEY", "$TYPESAFE_API_KEY"] },
+    {
+      "name": "compatible",
+      "enabled": false,
+      "base_url": "https://jev-gateway.example.com",
+      "path": "/v1/systemone",
+      "api_key": "$JEV_GATEWAY_API_KEY",
+      "model": "jev-latest",
+      "cost_field": "usage.cost",
+      "usd_per_mtok": null,
+      "verify": null
+    },
+    {
+      "name": "cloudflare",
+      "enabled": true,
+      "api_key": ["$JEV_CLOUDFLARE_API_TOKEN", "$CLOUDFLARE_API_TOKEN"],
+      "account_id": "$CLOUDFLARE_ACCOUNT_ID",
+      "model": "typesafe/jev"
+    },
+    { "name": "vercel", "enabled": true, "api_key": "$AI_GATEWAY_API_KEY", "model": "typesafe-ai/jev" },
+    {
+      "name": "local",
+      "enabled": "off",
+      "base_url": "http://127.0.0.1:8080",
+      "path": "/v1/systemone",
+      "adapter": "system-one",
+      "api_key": "$LOCAL_JEV_API_KEY",
+      "model": "jev-latest",
+      "model_pattern": "^[^/]+$",
+      "cost_field": null,
+      "usd_per_mtok": 0,
+      "verify": null,
+      "headers": { "X-Title": "quicksilver" }
+    }
+  ]
+}

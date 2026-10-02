@@ -22,23 +22,34 @@ Needs Node 18+ (globs need Node 22+). There are no other dependencies.
 
 ## First run: the key
 
-Run `qs status` first.
+Run `qs status` first. It lists the providers in the order they are tried
+(openrouter, typesafe, compatible, cloudflare, vercel by default), each with
+its state.
 
-- `ready` means go straight to the task.
-- `not configured` means no key was found. Never ask the user to paste a key into
-  the chat. The preferred fix: the user exports it in their shell profile, where
-  Quicksilver detects it, then restarts Claude Code so the session inherits it:
-  `JEV_API_KEY` (or `TYPESAFE_API_KEY`) with a key from **https://console.typesafe.ai**,
-  or `OPENROUTER_API_KEY` with a key from **https://openrouter.ai/settings/keys**.
-  Fallback without an env var: the user runs `node "<skill dir>/scripts/qs.mjs" setup`
-  in their own terminal (add `--provider openrouter` for an OpenRouter key). It prompts
-  with hidden input, verifies the key and saves it to `~/.quicksilver/config.json`
-  (user-only permissions).
+- Any line saying `ready` means go straight to the task. If a request fails on
+  one provider (rejected key, no credits, model unavailable, rate limit, server
+  error), Quicksilver retries it on the next provider by itself; the receipt
+  says `fell back N×` and why, and `~/.quicksilver/errors.log` has the details.
+- Every line saying `key missing` (exit 3) means no key was found. Never ask the
+  user to paste a key into the chat. The preferred fix: the user exports it in
+  their shell profile, where Quicksilver detects it, then restarts Claude Code
+  so the session inherits it: `OPENROUTER_API_KEY` with a key from
+  **https://openrouter.ai/settings/keys**, or `JEV_API_KEY` (or `TYPESAFE_API_KEY`)
+  with a key from **https://console.typesafe.ai**. Cloudflare (`CLOUDFLARE_API_TOKEN`
+  plus `CLOUDFLARE_ACCOUNT_ID`) and Vercel (`AI_GATEWAY_API_KEY`) work too.
+  Fallback without an env var: the user runs `node "<skill dir>/scripts/qs.mjs" setup --provider NAME`
+  in their own terminal. It prompts with hidden input, verifies the key and saves it
+  to `~/.quicksilver/providers.json` (user-only permissions).
+- The order, disabled providers, saved keys and custom endpoints live in
+  `~/.quicksilver/providers.json` (example: `<skill dir>/providers.example.json`).
+  `--provider NAME` uses one provider only, with no fallback. If a command says
+  `config.json is no longer read`, tell the user what it says to move; don't
+  edit their files.
 
-  Env keys take precedence over the saved key of the same provider. The provider is chosen by `--provider`, then `QUICKSILVER_PROVIDER`, then automatically openrouter whenever `OPENROUTER_API_KEY` is set, then the one saved by setup, then typesafe.
   Once a key is in place, carry on with the original task. Don't stop at "configured".
 
-Exit code 3 means a key problem: missing, rejected, or out of credits. Re-run setup.
+Exit code 3 means a key problem on every usable provider: missing, rejected, or
+out of credits. Re-run setup.
 Exit code 4 means Jev rejected the request (fix the question or labels); 5 means
 the request failed after retries; 1 is a usage or input error.
 
@@ -102,14 +113,14 @@ qs rank "<query>" <inputs> [--top 10 | --all]
 qs find "<what you're looking for>" <files> [--top 5] [--min-score 0.05] [--chunk 150]
 qs ask "<question>" --state @file|"text"|- [--choice "a,b,c" | --score "low|mid|high"]
 qs ask spec.json        # {"state": ..., "questions": {"id": {"type": "noul|choice|score", ...}}}
-qs status               # key check, plus lifetime tokens saved
+qs status               # the provider chain and each provider's state, plus lifetime tokens saved
 ```
 
 Add `--json` to any command for machine-readable output. Summary lines go to stderr.
 `--save FILE` (filter, classify) writes every per-item result to FILE, while stdout
 stays compact. `--width 160` clips printed item text; `--no-collapse` keeps repeated
-`--lines` patterns separate; `--concurrency 16`, `--provider typesafe|openrouter`
-and `--model NAME` apply everywhere.
+`--lines` patterns separate; `--concurrency 16`, `--provider NAME` (one provider,
+no fallback) and `--model NAME` apply everywhere.
 `--fast` packs small items into shared requests (`--pack-items`, `--pack-tokens 3000`).
 It's about 10× faster on big logs, but less accurate on subtle judgments. Use it for
 obvious needles (crashes, OOMs) in very large logs, not for classification.

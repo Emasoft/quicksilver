@@ -41,7 +41,7 @@ if (cmd === 'install') {
   // An exported key is the primary path: report it and never prompt. `status` lists the provider chain from
   // providers.json in order, with the variable each provider read; setup is skipped even if a check fails,
   // since the user chose the exported key. The names are the built-in providers' variables.
-  const envKey = ['OPENROUTER_API_KEY', 'JEV_API_KEY', 'TYPESAFE_API_KEY'].find((n) => process.env[n]);
+  const envKey = ['OPENROUTER_API_KEY', 'JEV_API_KEY', 'TYPESAFE_API_KEY', 'JEV_CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_API_TOKEN', 'AI_GATEWAY_API_KEY'].find((n) => process.env[n]);
   if (keyFlag) run(['setup', keyFlag, ...providerArgs]);
   else if (envKey) {
     console.log('\nFound an API key exported in your environment; no setup needed:');
@@ -49,10 +49,10 @@ if (cmd === 'install') {
   } else if (spawnSync(process.execPath, [QS, 'status', ...providerArgs], { stdio: 'ignore' }).status !== 0) {
     if (process.stdin.isTTY) {
       // No provider named here: setup's own prompt names the provider it resolved and where to get its key.
-      console.log('\nNo API key exported (JEV_API_KEY, TYPESAFE_API_KEY or OPENROUTER_API_KEY). One-time setup instead:');
+      console.log('\nNo API key exported (OPENROUTER_API_KEY, JEV_API_KEY, TYPESAFE_API_KEY, CLOUDFLARE_API_TOKEN or AI_GATEWAY_API_KEY). One-time setup instead:');
       if (run(['setup', ...providerArgs]) !== 0) console.log(`\nNo key saved. Run later: npx github:Emasoft/quicksilver setup`);
     } else {
-      console.log(`\nNext: export JEV_API_KEY (key from https://console.typesafe.ai) or OPENROUTER_API_KEY (key from https://openrouter.ai/settings/keys) in your shell profile; Quicksilver detects it. Without one, run: npx github:Emasoft/quicksilver setup`);
+      console.log(`\nNext: export OPENROUTER_API_KEY (key from https://openrouter.ai/settings/keys) or JEV_API_KEY (key from https://console.typesafe.ai) in your shell profile; Quicksilver detects it. Without one, run: npx github:Emasoft/quicksilver setup. Providers and their order: ~/.quicksilver/providers.json (example: ${path.join(DEST, 'providers.example.json')})`);
     }
   } else run(['status', ...providerArgs]);
   console.log(`\n${c('32', 'Done.')} Restart Claude Code (or start a new session). Claude now delegates bulk judgment calls to Jev automatically.`);

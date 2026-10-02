@@ -1320,3 +1320,20 @@ describe('vercel-evaluation adapter (built-in vercel, pointed at the mock)', () 
     assert.equal(reqs.length, 0);
   });
 });
+
+describe('providers.example.json', () => {
+  test('it is valid: openrouter first, typesafe second, every jev-mcp provider present, keys only as $VAR', async () => {
+    const raw = fs.readFileSync(path.join(ROOT, 'skills', 'quicksilver', 'providers.example.json'), 'utf8');
+    const doc = JSON.parse(raw);
+    const names = doc.providers.map((e) => e.name);
+    assert.deepEqual(names.slice(0, 2), ['openrouter', 'typesafe']);
+    for (const n of ['compatible', 'cloudflare', 'vercel']) assert.ok(names.includes(n), n);
+    for (const e of doc.providers) for (const k of [].concat(e.api_key ?? [])) assert.match(k, /^\$/, `${e.name} has a literal key`);
+    writeProviders(null, { raw, mode: 0o644 });
+    const r = await qs(['status'], { env: { JEV_API_KEY: undefined } });
+    assert.equal(r.code, 3, r.stdout + r.stderr); // valid, but no key is exported
+    assert.match(r.stdout, /^1\. openrouter /m);
+    assert.match(r.stdout, /^2\. typesafe /m);
+    assert.equal(r.stderr, '');
+  });
+});

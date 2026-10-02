@@ -33,8 +33,9 @@ you ─▶ Claude ──"which files handle auth?"──▶ quicksilver ──�
 
 Export your key in your shell profile (`~/.zshrc`, `~/.bashrc`, ...), if it isn't
 there already. Quicksilver detects it, so no key ever goes into a command:
-`JEV_API_KEY` (or `TYPESAFE_API_KEY`) with a key from [console.typesafe.ai](https://console.typesafe.ai),
-or `OPENROUTER_API_KEY` with a key from [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys).
+`OPENROUTER_API_KEY` with a key from [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys),
+or `JEV_API_KEY` (or `TYPESAFE_API_KEY`) with a key from [console.typesafe.ai](https://console.typesafe.ai).
+Cloudflare Workers AI and the Vercel AI Gateway work too (see [Providers](#providers)).
 Then run:
 
 ```bash
@@ -43,16 +44,14 @@ curl -fsSL https://raw.githubusercontent.com/Emasoft/quicksilver/main/install-de
 
 The script clones this fork into `~/.local/share/quicksilver` (or fast-forwards
 an existing clone there), copies the skill into `~/.claude/skills/quicksilver`,
-and reports which exported key and provider it will use. If `OPENROUTER_API_KEY`
-is set, Quicksilver uses OpenRouter automatically, even over a TypeSafe key; pass
-`--provider typesafe` (or set `QUICKSILVER_PROVIDER=typesafe`) to keep TypeSafe.
-With no exported key, it asks for one once, with hidden input, and saves it to
-`~/.quicksilver/config.json`.
+and lists the providers it found, in the order it will try them. With no
+exported key, it asks for one once, with hidden input, and saves it to
+`~/.quicksilver/providers.json`.
 Then restart Claude Code. That's it. Claude uses the skill on its own whenever
 a task looks like "read a lot to decide a little". Needs git and Node 18+.
 
 ```bash
-# pick the provider when both keys are exported (arguments after -- go to the installer)
+# check one provider only (arguments after -- go to the installer)
 curl -fsSL https://raw.githubusercontent.com/Emasoft/quicksilver/main/install-dev.sh | sh -s -- --provider typesafe
 
 # keep the clone somewhere else, or only print what the script would do
@@ -75,7 +74,7 @@ uncommitted edits, run `node ~/.local/share/quicksilver/bin/quicksilver.mjs inst
 # npx (detects an exported key the same way)
 npx github:Emasoft/quicksilver
 
-# no exported key: save one with a hidden prompt (add --provider openrouter for an OpenRouter key)
+# no exported key: save one with a hidden prompt (add --provider typesafe for a Jev/TypeSafe key)
 npx github:Emasoft/quicksilver setup
 
 # non-interactive fallback; in CI prefer exporting the env var in the job instead
@@ -89,8 +88,7 @@ npx github:Emasoft/quicksilver install --key YOUR_JEV_KEY
 git clone https://github.com/Emasoft/quicksilver && cd quicksilver && ./install.sh   # or .\install.ps1
 ```
 
-An exported key always beats a saved key of the same provider. Needs Node 18+.
-No npm dependencies.
+Needs Node 18+. No npm dependencies.
 </details>
 
 ## The benchmark
@@ -172,7 +170,7 @@ qs find     "the retry backoff logic" huge_module.py --top 3                    
 qs ask      "Does this contract allow termination without notice?" --state @contract.txt
 qs ask      "How severe is this?" --state @incident.md --score "minor|major|fatal"  # rate on a scale
 qs filter   "Does this file build SQL from user input?" src --json                  # machine-readable output
-qs status   --provider openrouter                                                   # key check + lifetime tokens saved
+qs status                                                                           # provider chain + lifetime tokens saved
 ```
 
 | Use case | Command |
@@ -215,6 +213,85 @@ one judgment per question, exact boundary cases, a catch-all label, and no
 arithmetic or dates. The question becomes a reusable, testable unit rather than
 a vibe.
 
+## Providers
+
+Quicksilver reaches Jev through any of five providers. They are tried in
+order: a request that fails on one goes to the next.
+
+| Provider | Key (environment) | Notes |
+| --- | --- | --- |
+| `openrouter` | `OPENROUTER_API_KEY` | `~typesafe/jev-latest` through openrouter.ai |
+| `typesafe` | `JEV_API_KEY` or `TYPESAFE_API_KEY` | TypeSafe's own API |
+| `compatible` | `JEV_GATEWAY_API_KEY` | any System One server; needs a `base_url` |
+| `cloudflare` | `CLOUDFLARE_API_TOKEN` (or `JEV_CLOUDFLARE_API_TOKEN`) and `CLOUDFLARE_ACCOUNT_ID` | Workers AI, model `typesafe/jev`; price not known to Quicksilver |
+| `vercel` | `AI_GATEWAY_API_KEY` | Vercel AI Gateway, model `typesafe-ai/jev`; no free key check, price not known |
+
+A provider whose key is not set is skipped without a word. To change the
+order, turn a provider off, store a key, or add your own endpoint, write
+`~/.quicksilver/providers.json` (or `$QUICKSILVER_HOME/providers.json`; it is
+never read from the working directory). The `providers` array **is** the
+priority and fallback order; built-ins you don't list keep their default order
+after yours:
+
+```json
+{
+  "version": 1,
+  "providers": [
+    { "name": "typesafe", "api_key": "$JEV_API_KEY" },
+    { "name": "openrouter", "api_key": "$OPENROUTER_API_KEY" },
+    { "name": "vercel", "enabled": "off" },
+    { "name": "my-proxy", "base_url": "https://jev.example.com", "path": "/v1/systemone",
+      "adapter": "system-one", "api_key": "${MY_PROXY_KEY}", "model": "jev-latest" }
+  ]
+}
+```
+
+[`skills/quicksilver/providers.example.json`](skills/quicksilver/providers.example.json)
+lists every provider with every field. The fields:
+
+| Field | Meaning |
+| --- | --- |
+| `name` | built-in name (override its fields) or a new name (`a-z`, `0-9`, `-`) |
+| `enabled` | `true`/`false`; also `yes`/`no`, `on`/`off`, `1`/`0`, `enabled`/`disabled`, `active`/`inactive`. Default `true` |
+| `api_key` | `"$VAR"` or `"${VAR}"` (read from the environment), a literal key, or an array of these (the first one set wins) |
+| `account_id` | Cloudflare account id, same forms as `api_key` |
+| `base_url`, `path` | where requests go; `https` only, plain `http` only to `localhost`/`127.0.0.1`/`[::1]` |
+| `adapter` | `system-one`, `cloudflare-ai-run` or `vercel-evaluation` (wire format; required for a new provider) |
+| `model`, `model_pattern` | default model; `--model`/`QUICKSILVER_MODEL` is used only where it matches the pattern |
+| `cost_field`, `usd_per_mtok` | where the reply reports dollars (`usage.cost`), else the price per million input tokens; `null` = unknown |
+| `verify` | path of a free GET key check used by `setup` and `status`, or `null` |
+| `headers`, `key_url` | extra non-secret headers; a URL shown in hints |
+
+A request moves to the next provider when the key is rejected (401/403), the
+credits are gone (402), the model is unavailable, or the provider keeps
+answering 429/5xx (or the network fails) after retries. A 400/422 means the
+request itself is wrong, so it stops the run instead. The failed provider is
+skipped for the rest of the run, and the receipt says so:
+
+```
+— 40 scanned · 3 matched · 0 borderline · 5.2s · jev 12k tok ($0.0005) · via typesafe (jev-latest) · ~11k Claude tokens not read
+— fell back 1×: openrouter → typesafe (out of credits, HTTP 402) (see ~/.quicksilver/errors.log)
+```
+
+Each provider error is written to `~/.quicksilver/errors.log` (time, provider,
+model, error, where it went next; keys masked; entries older than 72 hours are
+dropped). `--provider NAME` (or `QUICKSILVER_PROVIDER`) uses one provider only,
+with no fallback. `qs status` shows the chain and each provider's state:
+
+```
+providers, in fallback order (/Users/you/.quicksilver/providers.json):
+1. openrouter  no credits (HTTP 402) · key $OPENROUTER_API_KEY
+2. typesafe    ready · key $JEV_API_KEY · model jev-latest
+3. compatible  not configured (no base_url)
+4. cloudflare  key missing ($JEV_CLOUDFLARE_API_TOKEN, $CLOUDFLARE_API_TOKEN)
+5. vercel      disabled
+```
+
+Upgrading from 0.2: `~/.quicksilver/config.json` is no longer read. While it
+exists, every command stops and says what to move into `providers.json`
+(nothing is converted silently). `QUICKSILVER_API_BASE` is gone too: set
+`base_url` on the `typesafe` entry instead.
+
 ## Safety
 
 - It never sends secret-like files: `.env*`, `.envrc`, private keys and
@@ -232,15 +309,19 @@ a vibe.
   100 MB hard cap per file, stdin or `--items` file. `--max-bytes N` (or
   `QUICKSILVER_MAX_BYTES`) sets a lower cap: larger files are then skipped and
   a larger stdin or `--items` file is refused.
-- Content goes to TypeSafe's API (`api.typesafe.ai`), or through openrouter.ai
-  with the openrouter provider, which is chosen automatically whenever
-  `OPENROUTER_API_KEY` is set; OpenRouter's own data, logging and billing
-  policies then apply. TypeSafe states that Jev is not trained on customer
-  data. Don't point it at anything you can't send to a third party.
-- The key is stored in `~/.quicksilver/config.json` (or `$QUICKSILVER_HOME`)
-  with user-only permissions, one key per provider. An exported key needs no
-  file at all. `npx github:Emasoft/quicksilver setup --remove` deletes the
-  active provider's saved key.
+- Content goes to the provider that answers: openrouter.ai, TypeSafe's API
+  (`api.typesafe.ai`), Cloudflare, Vercel, or your own endpoint, and when one
+  fails the same content goes to the next one in your chain. Each provider's
+  own data, logging and billing policies apply. TypeSafe states that Jev is not
+  trained on customer data. Don't point it at anything you can't send to a
+  third party.
+- A key is only sent to the URL of the provider that owns it: one `$VAR` may
+  belong to one provider only, requests never follow redirects, and keys are
+  masked in messages and in `errors.log`. A literal key in `providers.json` is
+  refused unless the file is user-only (`chmod 600`); `setup` writes it that
+  way. An exported key needs no file at all.
+  `npx github:Emasoft/quicksilver setup --remove --provider NAME` deletes a
+  saved key.
 
 ## FAQ
 
