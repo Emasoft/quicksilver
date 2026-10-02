@@ -2,14 +2,16 @@
 // Real data: Loghub BGL, Banking77, SMS Spam, SST-2, honojs/hono, lodash. Synthetic where no labelled set exists.
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 
-const ROOT = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1'));
+// fileURLToPath decodes %20 and non-ASCII; URL.pathname kept them percent-encoded (audit m8).
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const RAW = path.join(ROOT, 'data', 'raw');
 const HONO = path.join(RAW, 'hono');
 
 let seed = 42;
-const rand = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+const rand = () => { seed = (seed * 1103515245 + 12345) % 2 ** 31; return seed / 2 ** 31; };
 const pick = (a) => a[Math.floor(rand() * a.length)];
 const shuffle = (a) => { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rand() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 
@@ -77,9 +79,9 @@ async function hfRows(dataset, config, split, n) {
     (i) => `DEBUG memory usage ${30 + (i % 40)}% heap=${200 + (i % 300)}MB`,
     (i) => `INFO connection pool size=${10 + (i % 5)} idle=${i % 7}`,
     (i) => `WARN deprecated header X-Api-Version used by client ${i % 50}`,
-    (i) => `INFO retrying idempotent GET /v1/feed after 1 transient 502 (attempt 1/3) succeeded`,
-    (i) => `INFO disk usage /var/lib/data 41% (ok)`,
-    (i) => `INFO TLS certificate valid for 62 more days`,
+    () => `INFO retrying idempotent GET /v1/feed after 1 transient 502 (attempt 1/3) succeeded`,
+    () => `INFO disk usage /var/lib/data 41% (ok)`,
+    () => `INFO TLS certificate valid for 62 more days`,
   ];
   const needles = {
     413: 'ERROR process killed: JavaScript heap out of memory (allocation failed - scavenge)',
@@ -148,17 +150,15 @@ const honoFiles = execFileSync('git', ['ls-files', 'src'], { cwd: HONO, encoding
   .filter((f) => /\.(ts|tsx)$/.test(f) && !/\.test\.tsx?$|\.d\.ts$|test-utils/.test(f));
 const honoTree = Object.fromEntries(honoFiles.map((f) => [f, fs.readFileSync(path.join(HONO, f), 'utf8')]));
 
-{
-  out('s06', honoTree, {
-    title: `Codebase discovery — honojs/hono, ${honoFiles.length} real source files: which implement request authentication?`,
-    kind: 'filter-files', input: 'src',
-    question: 'Is this file a middleware that authenticates incoming requests by verifying credentials or tokens (for example passwords, bearer tokens, or JWTs)?',
-    truth: ['src/middleware/basic-auth/index.ts', 'src/middleware/bearer-auth/index.ts', 'src/middleware/jwt/jwt.ts', 'src/middleware/jwk/jwk.ts'],
-    neutral: ['src/middleware/jwt/index.ts', 'src/middleware/jwk/index.ts', 'src/utils/basic-auth.ts', 'src/middleware/csrf/index.ts',
-      'src/middleware/ip-restriction/index.ts', ...honoFiles.filter((f) => f.startsWith('src/utils/jwt/'))],
-    source: 'https://github.com/honojs/hono',
-  });
-}
+out('s06', honoTree, {
+  title: `Codebase discovery — honojs/hono, ${honoFiles.length} real source files: which implement request authentication?`,
+  kind: 'filter-files', input: 'src',
+  question: 'Is this file a middleware that authenticates incoming requests by verifying credentials or tokens (for example passwords, bearer tokens, or JWTs)?',
+  truth: ['src/middleware/basic-auth/index.ts', 'src/middleware/bearer-auth/index.ts', 'src/middleware/jwt/jwt.ts', 'src/middleware/jwk/jwk.ts'],
+  neutral: ['src/middleware/jwt/index.ts', 'src/middleware/jwk/index.ts', 'src/utils/basic-auth.ts', 'src/middleware/csrf/index.ts',
+    'src/middleware/ip-restriction/index.ts', ...honoFiles.filter((f) => f.startsWith('src/utils/jwt/'))],
+  source: 'https://github.com/honojs/hono',
+});
 
 // ---------- S07 security shortlist (synthetic, planted vulns + look-alike safe code) ----------
 {

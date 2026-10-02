@@ -2,9 +2,11 @@
 // scores it against ground truth, and records Jev cost + the tokens Claude would have to read.
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
-const ROOT = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1'));
+// fileURLToPath decodes %20 and non-ASCII; URL.pathname kept them percent-encoded (audit m8).
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const QS = path.join(ROOT, '..', 'skills', 'quicksilver', 'scripts', 'qs.mjs');
 const SKILL_TOKENS = Math.ceil(fs.readFileSync(path.join(ROOT, '..', 'skills', 'quicksilver', 'SKILL.md'), 'utf8').length / 4);
 const TOOL_CALL_OVERHEAD = 40; // tokens for the tool-call wrapper around each command
@@ -33,8 +35,8 @@ function qs(dir, args, withSave = false) {
   return { out, saved, ms: Date.now() - t0, jev: jevTotal() - before, claudeTokens: tok(cmd) + tok(out) + TOOL_CALL_OVERHEAD };
 }
 
-const rows = (out) => out.split('\n').filter((l) => /^[ ?]?\d\.\d\d  /.test(l));
-const idOf = (line) => line.replace(/^[ ?]?\d\.\d\d  /, '').split('  ')[0].replace(/~$/, '');
+const rows = (out) => out.split('\n').filter((l) => /^[ ?]?\d\.\d\d {2}/.test(l));
+const idOf = (line) => line.replace(/^[ ?]?\d\.\d\d {2}/, '').split('  ')[0].replace(/~$/, '');
 const lineNo = (id) => Number(id.split(':').pop());
 
 function prf(pred, truth, neutral = []) {

@@ -1,8 +1,10 @@
 // Renders results/results.json into assets/benchmark.svg for the README.
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1'));
+// fileURLToPath decodes %20 and non-ASCII; URL.pathname kept them percent-encoded (audit m8).
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const { rows, all } = JSON.parse(fs.readFileSync(path.join(ROOT, 'results', 'results.json'), 'utf8'));
 
 const W = 960, rowH = 34, top = 118, left = 300, barW = 400;

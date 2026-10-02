@@ -1,8 +1,10 @@
 // Scores the Claude-native baseline, merges it with the Quicksilver run, and writes results.md + results.json.
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1'));
+// fileURLToPath decodes %20 and non-ASCII; URL.pathname kept them percent-encoded (audit m8).
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const R = path.join(ROOT, 'results');
 const qs = JSON.parse(fs.readFileSync(path.join(R, 'quicksilver.json'), 'utf8'));
 const usage = JSON.parse(fs.readFileSync(path.join(R, 'baseline', 'usage.json'), 'utf8'));
