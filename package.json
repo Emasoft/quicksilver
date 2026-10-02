@@ -15,7 +15,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test tests/"
+    "test": "node --test tests/",
+    "sync-docs": "node scripts/sync-skill-help.mjs"
   },
   "engines": {
     "node": ">=18"

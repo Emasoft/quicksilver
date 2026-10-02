@@ -156,8 +156,10 @@ the same as Claude's. The win there is tokens and context, not speed. Add
 ## What Claude can do with it
 
 Claude runs these on its own; you can too. `qs` stands for
-`node ~/.claude/skills/quicksilver/scripts/qs.mjs`, and `qs help` lists every
-command, option, environment variable and exit code.
+`node ~/.claude/skills/quicksilver/scripts/qs.mjs`. The reference is `qs help`:
+every command, option, default, environment variable and exit code, generated
+from the code (the skill's `SKILL.md` embeds the same text). This page only
+shows examples.
 
 ```bash
 qs filter   "Does this file handle user sessions?" src --ext ts,tsx                # which files matter
@@ -188,8 +190,8 @@ The output is built for an LLM to read: one line per hit, repeated log patterns
 collapsed into line-number ranges, classify results as id lists, and a `?` on
 anything borderline.
 
-Nothing is truncated. A file or item longer than `--chunk-chars` (60,000
-characters, sized for Jev's 32k-token context) is split at line ends into
+Nothing is truncated. A file or item longer than `--chunk-chars` (the default
+is sized for Jev's 32k-token context; see `qs help`) is split at line ends into
 overlapping chunks that are judged separately, and the highest-scoring chunk
 decides the item: the highest yes-probability for `filter`, the highest score
 for `rank` and `ask --score`. For `classify` and `ask --choice` the best real
@@ -221,15 +223,14 @@ a vibe.
 
 Quicksilver reaches Jev through any of five built-in providers. They are
 tried in order: a request that fails on one goes to the next. Without a
-`providers.json`, the chain is the built-ins in this order: openrouter,
-typesafe, compatible, cloudflare, vercel.
+`providers.json`, the chain is the built-ins in the order of this table.
 
 | Provider | Key (environment) | Notes |
 | --- | --- | --- |
 | `openrouter` | `OPENROUTER_API_KEY` | `~typesafe/jev-latest` through openrouter.ai |
-| `typesafe` | `JEV_API_KEY` or `TYPESAFE_API_KEY` | TypeSafe's own API |
+| `typesafe` | `JEV_API_KEY` or `TYPESAFE_API_KEY` (the first one set wins) | TypeSafe's own API |
 | `compatible` | `JEV_GATEWAY_API_KEY` | any System One server; needs a `base_url` |
-| `cloudflare` | `CLOUDFLARE_API_TOKEN` (or `JEV_CLOUDFLARE_API_TOKEN`) and `CLOUDFLARE_ACCOUNT_ID` | Workers AI, model `typesafe/jev`; price not known to Quicksilver |
+| `cloudflare` | `JEV_CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_API_TOKEN` (the first one set wins), and `CLOUDFLARE_ACCOUNT_ID` | Workers AI, model `typesafe/jev`; price not known to Quicksilver |
 | `vercel` | `AI_GATEWAY_API_KEY` | Vercel AI Gateway, model `typesafe-ai/jev`; no free key check, price not known |
 
 A provider whose key is not set is skipped without a word. To change the
@@ -254,16 +255,16 @@ do list only supplies defaults for the fields you leave out:
 ```
 
 [`skills/quicksilver/providers.example.json`](skills/quicksilver/providers.example.json)
-lists every provider with every field. The fields:
+lists every provider with every field, and `qs help` lists the accepted values. The fields:
 
 | Field | Meaning |
 | --- | --- |
 | `name` | built-in name (override its fields) or a new name (`a-z`, `0-9`, `-`) |
-| `enabled` | `true`/`false`; also `yes`/`no`, `on`/`off`, `1`/`0`, `enabled`/`disabled`, `active`/`inactive`. Default `true` |
+| `enabled` | `true`/`false`, or one of the on/off words `qs help` lists (case-insensitive); any other value is an error. Default `true` |
 | `api_key` | `"$VAR"` or `"${VAR}"` (read from the environment), a literal key, or an array of these (the first one set wins) |
 | `account_id` | Cloudflare account id, same forms as `api_key` |
 | `base_url`, `path` | where requests go; `https` only, plain `http` only to `localhost`/`127.0.0.1`/`[::1]` |
-| `adapter` | `system-one`, `cloudflare-ai-run` or `vercel-evaluation` (wire format; required for a new provider) |
+| `adapter` | the wire format, one of the adapters `qs help` lists (required for a new provider) |
 | `model`, `model_pattern` | default model; `--model`/`QUICKSILVER_MODEL` is used only where it matches the pattern |
 | `cost_field`, `usd_per_mtok` | where the reply reports dollars (`usage.cost`), else the price per million input tokens; `null` = unknown |
 | `verify` | path of a free GET key check used by `setup` and `status`, or `null` |
@@ -286,8 +287,8 @@ failure, and the exit code is 3 if any of them was a key or credit problem:
 ```
 
 Each provider error is written to `~/.quicksilver/errors.log` (time, provider,
-model, error, where it went next; keys masked; entries older than 72 hours are
-dropped). `--provider NAME` (or `QUICKSILVER_PROVIDER`) pins one provider:
+model, error, where it went next; keys masked; old entries are dropped after
+the time `qs help` states). `--provider NAME` (or `QUICKSILVER_PROVIDER`) pins one provider:
 that provider only, with no fallback. With a `providers.json`, NAME must be one
 of its entries (only `setup --provider NAME` may add a built-in the file does
 not name yet); a disabled NAME is an error, and a NAME with no key exits 3
@@ -322,7 +323,7 @@ exists, every command stops and says what to move into `providers.json`
   `QUICKSILVER_FOLLOW_SYMLINKS=1`) reads them; the secret guard then also checks
   the link's target.
 - It respects `.gitignore` and skips binaries. Any input size is read, up to a
-  100 MB hard cap per file, stdin or `--items` file. `--max-bytes N` (or
+  fixed hard cap per file, stdin or `--items` file (`qs help` states it). `--max-bytes N` (or
   `QUICKSILVER_MAX_BYTES`) sets a lower cap: larger files are then skipped and
   a larger stdin or `--items` file is refused.
 - Content goes to the provider that answers: openrouter.ai, TypeSafe's API
