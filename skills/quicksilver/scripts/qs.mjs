@@ -98,19 +98,31 @@ function writeJson(file, obj, mode = 0o600) {
   fs.renameSync(tmp, file);
 }
 
+// Config: { provider, model, keys: { typesafe, openrouter } }. One key slot per provider, so setting up one
+// provider no longer overwrites the other's key. A legacy top-level api_key belonged to cfg.provider (default
+// typesafe): it is moved into `keys` here and the new layout is persisted by the next write.
+function readConfig() {
+  const cfg = readJson(CONFIG, {});
+  if (cfg.api_key !== undefined) {
+    cfg.keys = { [cfg.provider || 'typesafe']: cfg.api_key, ...cfg.keys };
+    delete cfg.api_key;
+  }
+  cfg.keys ??= {};
+  return cfg;
+}
+
 function apiKey() {
   const name = PROVIDERS[PROVIDER].env.find((n) => process.env[n]);
   if (name) return process.env[name];
-  const cfg = readJson(CONFIG, {});
-  return (cfg.provider || 'typesafe') === PROVIDER ? cfg.api_key || '' : '';
+  return readConfig().keys[PROVIDER] || '';
 }
 
 function resolveProvider(flags) {
-  const cfg = readJson(CONFIG, {});
+  const cfg = readConfig();
   const e = process.env;
-  // user requirement: an OpenRouter key in the env always wins unless a provider is named explicitly
   // `--provider=` (empty) must not fall through to the env/config default silently.
   if (flags.provider === true || flags.provider === '') die('--provider needs a value (typesafe|openrouter)');
+  // user requirement: an OpenRouter key in the env always wins unless a provider is named explicitly
   PROVIDER = flags.provider || e.QUICKSILVER_PROVIDER || (e.OPENROUTER_API_KEY ? 'openrouter' : '') || cfg.provider || 'typesafe';
   if (!PROVIDERS[PROVIDER]) die(`unknown provider "${PROVIDER}" (use ${Object.keys(PROVIDERS).join('|')})`);
   // QUICKSILVER_API_BASE is a TypeSafe-proxy override only: an OPENROUTER_API_KEY in env switches provider
@@ -127,7 +139,7 @@ function resolveProvider(flags) {
 }
 
 function modelName(flags) {
-  const cfg = readJson(CONFIG, {});
+  const cfg = readConfig();
   const cfgModel = (cfg.provider || 'typesafe') === PROVIDER ? cfg.model : undefined;
   return flags.model || process.env.QUICKSILVER_MODEL || cfgModel || PROVIDERS[PROVIDER].model;
 }
@@ -640,10 +652,10 @@ async function promptHidden(q) {
 async function cmdSetup({ pos, flags }) {
   const { keyUrl, verify } = PROVIDERS[PROVIDER];
   if (flags.remove) {
-    const cfg = readJson(CONFIG, {});
-    delete cfg.api_key;
+    const cfg = readConfig();
+    delete cfg.keys[PROVIDER]; // only the active provider's key; the other slot stays
     writeJson(CONFIG, cfg, 0o600);
-    return console.log(`Removed saved key from ${CONFIG}`);
+    return console.log(`Removed the saved ${PROVIDER} key from ${CONFIG}`);
   }
   const key = (pos[0] || (await promptHidden(`Paste your ${PROVIDER} API key (from ${keyUrl}): `))).trim();
   if (!key) die(`no key given. Get one at ${keyUrl}`);
@@ -655,11 +667,11 @@ async function cmdSetup({ pos, flags }) {
   // Every provider-side refusal is exit 3 (key or account problem, re-run setup), as for normal commands.
   if (res.status === 402) die(outOfCredits(), 3);
   if (!res.ok) die(`could not verify the key: ${PROVIDER} answered HTTP ${res.status}`, 3);
-  const cfg = readJson(CONFIG, {});
+  const cfg = readConfig();
   // A model name saved for the other provider is meaningless here (different id), so drop it.
   if ((cfg.provider || 'typesafe') !== PROVIDER && !flags.model) delete cfg.model;
   cfg.provider = PROVIDER;
-  cfg.api_key = key;
+  cfg.keys[PROVIDER] = key;
   if (flags.model) cfg.model = flags.model;
   writeJson(CONFIG, cfg, 0o600);
   console.log(`✓ ${PROVIDER} key verified and saved to ${CONFIG}. Quicksilver is ready.`);
