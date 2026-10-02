@@ -78,7 +78,11 @@ const f2 = (x) => x.toFixed(2);
 // ---------- config / stats ----------
 
 function readJson(file, fallback) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
+  // Only a missing file means "use the fallback". A corrupt file used to read as {} too, and `setup --remove`
+  // then overwrote it, losing the saved provider and model (audit m6).
+  let raw;
+  try { raw = fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return fallback; throw e; }
+  try { return JSON.parse(raw); } catch (e) { return die(`${file} is not valid JSON (${e.message}); fix or delete it`); }
 }
 
 function writeJson(file, obj, mode) {
