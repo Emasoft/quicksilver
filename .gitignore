@@ -3,3 +3,7 @@ node_modules/
 bench/data/
 bench/results/.last-save.json
 bench/results/quicksilver-packed.json
+.DS_Store
+reports/
+reports_dev/
+.janitor/
