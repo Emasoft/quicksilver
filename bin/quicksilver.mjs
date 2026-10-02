@@ -24,12 +24,20 @@ const [cmd = 'install', ...rest] = process.argv.slice(2);
 if (cmd === 'install') {
   const [major] = process.versions.node.split('.').map(Number);
   if (major < 18) { console.error('Quicksilver needs Node 18 or newer.'); process.exit(1); }
-  fs.mkdirSync(DEST, { recursive: true });
+  // Replace, not overlay: cpSync over an old copy left files a newer version deleted. DEST is the installer's
+  // own skills/quicksilver folder, so emptying it touches nothing else.
+  const replaced = fs.existsSync(DEST);
+  fs.rmSync(DEST, { recursive: true, force: true });
   fs.cpSync(SRC, DEST, { recursive: true });
-  console.log(`${c('36', '☿ quicksilver')} skill installed → ${DEST}`);
+  console.log(`${c('36', '☿ quicksilver')} skill installed → ${DEST}${replaced ? ' (previous copy replaced)' : ''}`);
 
   const keyFlag = rest.find((a) => a.startsWith('--key='))?.slice(6) || (rest.includes('--key') ? rest[rest.indexOf('--key') + 1] : '');
-  const providerArgs = rest.flatMap((a, i) => (a === '--provider' ? (typeof rest[i + 1] === 'string' && !rest[i + 1].startsWith('--') ? [a, rest[i + 1]] : []) : a.startsWith('--provider=') ? [a] : []));
+  // --provider X / --provider=X are forwarded to every qs call, so status and setup judge the same provider.
+  const providerArgs = [];
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i].startsWith('--provider=')) providerArgs.push(rest[i]);
+    else if (rest[i] === '--provider' && rest[i + 1] && !rest[i + 1].startsWith('--')) providerArgs.push(rest[i], rest[++i]);
+  }
   // An exported key is the primary path: report it and never prompt. `status` names the provider that will
   // actually be used (OPENROUTER_API_KEY wins unless --provider/QUICKSILVER_PROVIDER says otherwise) and the
   // env var it read; setup is skipped even if the check fails, since setup would not override the env var.
@@ -38,14 +46,15 @@ if (cmd === 'install') {
   else if (envKey) {
     console.log('\nFound an API key exported in your environment; no setup needed:');
     run(['status', ...providerArgs]);
-  } else if (spawnSync(process.execPath, [QS, 'status'], { stdio: 'ignore' }).status !== 0) {
+  } else if (spawnSync(process.execPath, [QS, 'status', ...providerArgs], { stdio: 'ignore' }).status !== 0) {
     if (process.stdin.isTTY) {
-      console.log(`\nOne-time setup: paste your Jev API key (create one at ${c('4', 'https://console.typesafe.ai')}), or an OpenRouter key with --provider openrouter (https://openrouter.ai/settings/keys).`);
+      // No provider named here: setup's own prompt names the provider it resolved and where to get its key.
+      console.log('\nNo API key exported (JEV_API_KEY, TYPESAFE_API_KEY or OPENROUTER_API_KEY). One-time setup instead:');
       if (run(['setup', ...providerArgs]) !== 0) console.log(`\nNo key saved. Run later: npx github:Emasoft/quicksilver setup`);
     } else {
       console.log(`\nNext: export JEV_API_KEY (key from https://console.typesafe.ai) or OPENROUTER_API_KEY (key from https://openrouter.ai/settings/keys) in your shell profile; Quicksilver detects it. Without one, run: npx github:Emasoft/quicksilver setup`);
     }
-  } else run(['status']);
+  } else run(['status', ...providerArgs]);
   console.log(`\n${c('32', 'Done.')} Restart Claude Code (or start a new session). Claude now delegates bulk judgment calls to Jev automatically.`);
   console.log(`Try asking: "which files in this repo handle auth?" or "find the errors in app.log".`);
 } else if (cmd === 'uninstall') {
