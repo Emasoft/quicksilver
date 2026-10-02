@@ -532,6 +532,39 @@ describe('review 3: --provider= with no value', () => {
   });
 });
 
+describe('installer exit codes', () => {
+  const install = (args, env = {}) => runNode(BIN, args, { env: { CLAUDE_CONFIG_DIR: fs.mkdtempSync(path.join(TMP, 'claude-')), ...env } });
+
+  test('install with a good --key saves it, prints Done and exits 0', async () => {
+    const r = await install(['install', '--key', 'k-good', '--provider', 'typesafe'], { JEV_API_KEY: undefined });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /Done\./);
+    assert.equal(readProviders().providers[0].api_key, 'k-good');
+  });
+
+  test('install with a rejected --key exits 3, says setup failed and skips the success lines', async () => {
+    verifyStatus = 401;
+    const r = await install(['install', '--key', 'k-bad', '--provider', 'typesafe'], { JEV_API_KEY: undefined });
+    assert.equal(r.code, 3, r.stdout + r.stderr);
+    assert.match(r.stderr, /rejected/);
+    assert.match(r.stderr, /Setup failed.*skill is installed/);
+    assert.doesNotMatch(r.stdout, /Done\.|Try asking/);
+  });
+
+  test('uninstall exits 0 and names the real QUICKSILVER_HOME', async () => {
+    const r = await install(['uninstall']);
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(r.stdout.includes(path.join(QHOME, 'providers.json')), r.stdout);
+    assert.doesNotMatch(r.stdout, /~\/\.quicksilver/);
+  });
+
+  test('an unknown command exits 1', async () => {
+    const r = await install(['nonsense']);
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /unknown command "nonsense"/);
+  });
+});
+
 describe('review 4: installer passes --provider to its status pre-check', () => {
   test('a saved typesafe key does not count as ready for --provider openrouter', async () => {
     writeProviders([{ name: 'typesafe', base_url: BASE, api_key: KEY }]);

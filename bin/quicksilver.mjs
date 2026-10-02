@@ -42,8 +42,15 @@ if (cmd === 'install') {
   // providers.json in order, with the variable each provider read; setup is skipped even if a check fails,
   // since the user chose the exported key. The names are the built-in providers' variables.
   const envKey = ['OPENROUTER_API_KEY', 'JEV_API_KEY', 'TYPESAFE_API_KEY', 'JEV_CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_API_TOKEN', 'AI_GATEWAY_API_KEY'].find((n) => process.env[n]);
-  if (keyFlag) run(['setup', keyFlag, ...providerArgs]);
-  else if (envKey) {
+  if (keyFlag) {
+    // An explicit --key is a request to set up: a rejected key must fail the install (setup's own exit code,
+    // 3 for a key problem), not fall through to the success lines. The skill files stay installed.
+    const status = run(['setup', keyFlag, ...providerArgs]);
+    if (status !== 0) {
+      console.error(`\nSetup failed: the key was not saved. The skill is installed; fix the key and run: npx github:Emasoft/quicksilver setup KEY`);
+      process.exit(status);
+    }
+  } else if (envKey) {
     console.log('\nFound an API key exported in your environment; no setup needed:');
     run(['status', ...providerArgs]);
   } else if (spawnSync(process.execPath, [QS, 'status', ...providerArgs], { stdio: 'ignore' }).status !== 0) {
@@ -59,7 +66,9 @@ if (cmd === 'install') {
   console.log(`Try asking: "which files in this repo handle auth?" or "find the errors in app.log".`);
 } else if (cmd === 'uninstall') {
   fs.rmSync(DEST, { recursive: true, force: true });
-  console.log(`Removed ${DEST}. Saved keys stay in ~/.quicksilver/providers.json. Delete that folder to remove them.`);
+  // The real home, as qs.mjs resolves it: a QUICKSILVER_HOME user would otherwise be pointed at the wrong folder.
+  const home = process.env.QUICKSILVER_HOME || path.join(os.homedir(), '.quicksilver');
+  console.log(`Removed ${DEST}. Saved keys stay in ${path.join(home, 'providers.json')}. Delete that folder to remove them.`);
 } else {
   if (!fs.existsSync(QS)) {
     const local = path.join(SRC, 'scripts', 'qs.mjs');
