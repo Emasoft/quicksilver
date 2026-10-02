@@ -293,6 +293,11 @@ function buildProviders(doc) {
     if (!base) for (const f of REQUIRED) if (e[f] === undefined) die(`${at} ("${e.name}"): "${f}" is required for a provider that is not built in`);
     out.push(checkEntry({ ...base, ...e }, `${at} ("${e.name}")`));
   }
+  // A custom entry on a known provider's host (a built-in's default host, or the host the file gives a built-in)
+  // inherits that provider's free key check, so status can verify it. An explicit "verify": null is kept.
+  const host = (u) => (u ? new URL(u).host : null);
+  const checks = [...out.filter((p) => builtin.has(p.name)), ...BUILTINS].filter((p) => p.verify);
+  for (const p of out) if (!builtin.has(p.name) && p.verify === undefined) p.verify = checks.find((k) => host(k.base_url) === host(p.base_url))?.verify ?? null;
   // One $VAR, one provider: otherwise a key exported for one service would be sent to another one's URL.
   const owner = new Map();
   for (const p of out.filter((x) => x.enabled)) {
@@ -1185,14 +1190,15 @@ async function cmdStatus() {
     if (p.state === 'no-key') return { p, text: `key missing (${p.tried.join(', ') || 'no api_key'})` };
     if (p.state === 'no-account') return { p, text: `account id missing (${p.acctTried.join(', ')})` };
     if (p.state !== 'ready') return { p, text: why[p.state] };
-    let st = 'ready (key not verified: no free check)';
+    // Without a free check the key is only known to be set, so it is never called "ready".
+    let st = 'key present (not verified)';
     if (p.verify) {
       const s = await verifyKey(p, p.key);
       st = s === 0 ? 'unreachable' : s === 401 || s === 403 ? `rejected (HTTP ${s})` : s === 402 ? `no credits (HTTP ${s})` : s < 300 ? 'ready' : `check failed (HTTP ${s})`;
     }
-    const ready = st.startsWith('ready');
-    // unreachable still counts: the key is there, and setup would not fix the network
-    return { p, ok: ready || st === 'unreachable', text: `${st} · key ${p.keySource}${ready ? ` · model ${modelFor(p)}` : ''}` };
+    const ready = st === 'ready';
+    // unreachable and unverifiable still count: the key is there, and setup would not fix the network
+    return { p, ok: ready || st === 'unreachable' || !p.verify, text: `${st} · key ${p.keySource}${ready ? ` · model ${modelFor(p)}` : ''}` };
   }));
   const w = Math.max(...rows.map((r) => r.p.name.length));
   console.log(`providers, in fallback order (${fs.existsSync(PROVIDERS_FILE) ? PROVIDERS_FILE : 'built-in: no providers.json yet'}):`);

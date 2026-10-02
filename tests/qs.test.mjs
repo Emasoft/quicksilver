@@ -907,9 +907,20 @@ describe('providers.json: the array order is the chain', () => {
     writeProviders([mock2(), { name: 'typesafe', base_url: BASE }]);
     const r = await qs(['status'], { env: { MOCK2_KEY: 'k2' } });
     assert.equal(r.code, 0, r.stdout + r.stderr);
-    assert.match(r.stdout, /^1\. mock2 +ready \(key not verified: no free check\) · key \$MOCK2_KEY · model m2$/m);
+    assert.match(r.stdout, /^1\. mock2 +ready · key \$MOCK2_KEY · model m2$/m);
     assert.match(r.stdout, /^2\. typesafe +ready · key \$JEV_API_KEY · model jev-latest$/m);
     assert.doesNotMatch(r.stdout, /^3\./m);
+  });
+
+  test('a custom entry on a known provider host inherits its key check; with no check it is never "ready"', async () => {
+    verifyStatus = 401;
+    writeProviders([mock2(), { name: 'typesafe', base_url: BASE }]); // mock2 shares the typesafe host
+    const a = await qs(['status'], { env: { MOCK2_KEY: 'k2' } });
+    assert.match(a.stdout, /^1\. mock2 +rejected \(HTTP 401\)/m);
+    writeProviders([mock2()]); // a host no known provider uses: no free check
+    const b = await qs(['status'], { env: { MOCK2_KEY: 'k2' } });
+    assert.equal(b.code, 0, b.stdout + b.stderr);
+    assert.match(b.stdout, /^1\. mock2 +key present \(not verified\) · key \$MOCK2_KEY$/m);
   });
 
   test('a file naming only openrouter: status lists exactly that one provider', async () => {
