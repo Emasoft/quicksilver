@@ -217,7 +217,9 @@ async function pool(tasks, n) {
 
 function gitFiles(dir) {
   try {
-    const out = execFileSync('git', ['ls-files', '-co', '--exclude-standard', '-z', '--', '.'], {
+    // The scanned directory's own .git/config is untrusted input (e.g. an unpacked archive): core.fsmonitor
+    // there names a program that `git ls-files` would run. Pin it off.
+    const out = execFileSync('git', ['-c', 'core.fsmonitor=false', 'ls-files', '-co', '--exclude-standard', '-z', '--', '.'], {
       cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024,
     });
     return out.split('\0').filter(Boolean).map((f) => path.join(dir, f));

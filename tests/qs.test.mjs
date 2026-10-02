@@ -612,3 +612,16 @@ describe('installer: stale files and dev install script', () => {
     assert.match(r.out, /not on main/);
   });
 });
+
+describe('nit: a scanned repo cannot run code through its own git config', () => {
+  test('core.fsmonitor in the scanned repo is not executed', async () => {
+    const repo = mkdir({ 'a.txt': 'inside-a' }, { git: true });
+    const marker = path.join(repo, 'PWNED');
+    const hook = path.join(TMP, `fsmonitor-${path.basename(repo)}.sh`);
+    fs.writeFileSync(hook, `#!/bin/sh\ntouch "${marker}"\n`, { mode: 0o755 });
+    execFileSync('git', ['config', 'core.fsmonitor', hook], { cwd: repo });
+    const r = await qs(['filter', 'q?', '.'], { cwd: repo });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(fs.existsSync(marker), false);
+  });
+});
