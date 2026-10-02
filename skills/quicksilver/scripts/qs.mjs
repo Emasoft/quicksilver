@@ -7,11 +7,13 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 
+const VERSION = '0.3.0'; // keep equal to package.json (a test checks); written into errors.log
 // The config home. Provider settings and keys are read only from here, never from the working directory.
 const HOME = process.env.QUICKSILVER_HOME || path.join(os.homedir(), '.quicksilver');
 const PROVIDERS_FILE = path.join(HOME, 'providers.json');
 const LEGACY_CONFIG = path.join(HOME, 'config.json'); // no longer read: its presence stops every command
 const STATS = path.join(HOME, 'stats.json');
+const ERRORS_LOG = path.join(HOME, 'errors.log');
 // Converts the token count of stats files written before jev_cost_usd existed.
 const PRICE_PER_TOKEN = 0.042 / 1e6;
 
@@ -107,12 +109,13 @@ function readJson(file, fallback) {
 // The directory holds the API key, so it is created 0700. Writing a fresh temp file and renaming it over the
 // target is atomic (same directory, same filesystem): a crash never leaves a truncated config, and the new
 // file always gets `mode`, which also made the old best-effort chmod of an existing file unnecessary.
-function writeJson(file, obj, mode = 0o600) {
+function writeFileAtomic(file, text, mode = 0o600) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n', { mode });
+  fs.writeFileSync(tmp, text, { mode });
   fs.renameSync(tmp, file);
 }
+const writeJson = (file, obj) => writeFileAtomic(file, `${JSON.stringify(obj, null, 2)}\n`);
 
 // ---------- providers ----------
 
@@ -386,22 +389,73 @@ const ADAPTERS = {
 };
 
 // Totals of the whole run, across providers, for the footer and stats.json.
-const RUN = { requests: 0, jevTokens: 0, cost: 0, costUnknown: false, used: {} };
+const RUN = { requests: 0, jevTokens: 0, cost: 0, costUnknown: false, used: {}, fallbacks: {}, lastError: null };
+const DEAD = new Set(); // providers that failed in this run: skipped by every later request
+const REASONS = { 'key-rejected': 'key rejected', 'no-credits': 'out of credits', 'model-unavailable': 'model unavailable',
+  'rate-limited': 'rate limited', 'server-error': 'server error', network: 'network error', 'bad-response': 'unusable reply' };
 
 // One judgment request through the chain. Returns { answers, usage: { input_tokens }, model }.
+// User decision: the providers array is the fallback order "in case of errors, exhausted credits, or missing env
+// var". A key, credit, model, rate-limit, server or network failure moves this request to the next provider and
+// takes the failed one out for the rest of the run. A request-shape error (400/422) would fail on every provider,
+// so it stops the run instead. A pinned chain has one provider, so nothing falls back.
 async function jev(state, questions, specModel) {
   requireReady();
-  const p = CHAIN[0];
-  const model = modelFor(p, specModel);
-  let r;
-  try { r = await callProvider(p, model, state, questions); } catch (e) { if (!e.kind) throw e; die(e.message, e.exit); }
-  RUN.requests += 1;
-  RUN.jevTokens += r.usage.input_tokens;
-  if (r.cost == null) RUN.costUnknown = true;
-  else RUN.cost += r.cost;
-  const used = `${p.name} (${r.model || model})`;
-  RUN.used[used] = (RUN.used[used] || 0) + 1;
-  return r;
+  for (const [i, p] of CHAIN.entries()) {
+    if (DEAD.has(p.name)) continue;
+    const model = modelFor(p, specModel);
+    let r;
+    try { r = await callProvider(p, model, state, questions); } catch (e) {
+      if (!e.kind) throw e;
+      const stop = e.kind === 'request-rejected';
+      const next = stop ? null : CHAIN.slice(i + 1).find((x) => !DEAD.has(x.name));
+      logError(p, model, e, stop ? 'no' : next?.name ?? 'none-left');
+      if (stop) die(e.message, e.exit);
+      DEAD.add(p.name);
+      RUN.lastError = e;
+      if (next) {
+        const k = `${p.name} → ${next.name} (${REASONS[e.kind]}${e.status ? `, HTTP ${e.status}` : ''})`;
+        RUN.fallbacks[k] = (RUN.fallbacks[k] || 0) + 1;
+      }
+      continue;
+    }
+    RUN.requests += 1;
+    RUN.jevTokens += r.usage.input_tokens;
+    if (r.cost == null) RUN.costUnknown = true;
+    else RUN.cost += r.cost;
+    const used = `${p.name} (${r.model || model})`;
+    RUN.used[used] = (RUN.used[used] || 0) + 1;
+    return r;
+  }
+  const e = RUN.lastError;
+  return die(CHAIN.length > 1 ? `every provider failed; the last one: ${e.message} (all of them in ${ERRORS_LOG})` : e.message, e.exit);
+}
+
+// ISO 8601 local time with its offset, e.g. 2026-10-02T08:30:00+02:00 (Date.parse reads it back).
+function isoNow(d = new Date()) {
+  const off = -d.getTimezoneOffset(), pad = (n) => String(Math.floor(Math.abs(n))).padStart(2, '0');
+  return `${new Date(d.getTime() + off * 60000).toISOString().slice(0, 19)}${off < 0 ? '-' : '+'}${pad(off / 60)}:${pad(off % 60)}`;
+}
+
+// User decision: every provider error goes to errors.log, which is "truncated at 72 hours". A provider skipped
+// for an unset variable is not an error and never reaches here. The message is our own text plus a redacted
+// snippet, so no key is written. Entries older than 72 hours are dropped on every write, and the file is
+// rewritten whole (temp + rename, 0600). ponytail: two quicksilver processes logging at the same instant can
+// drop one line (last rename wins); a lock file is the upgrade if that ever matters. A failed write must not
+// end the run: it is reported once on stderr.
+let logWarned = false;
+function logError(p, model, e, fallback) {
+  const line = `${isoNow()} quicksilver/${VERSION} provider=${p.name} model=${model} kind=${e.kind} status=${e.status || '-'} fallback=${fallback} msg=${JSON.stringify(redact(e.message, p))}\n`;
+  try {
+    const cutoff = Date.now() - 72 * 3600e3;
+    let old = '';
+    try { old = fs.readFileSync(ERRORS_LOG, 'utf8'); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+    const kept = old.split('\n').filter((l) => Date.parse(l.slice(0, l.indexOf(' '))) >= cutoff);
+    writeFileAtomic(ERRORS_LOG, kept.map((l) => `${l}\n`).join('') + line);
+  } catch (err) {
+    if (!logWarned) process.stderr.write(`quicksilver: warning: could not write ${ERRORS_LOG}: ${err.message}\n`);
+    logWarned = true;
+  }
 }
 
 // A provider failure: kind and HTTP status for the log, the exit code if it ends the run.
@@ -431,7 +485,11 @@ async function callProvider(p, model, state, questions, { retries = 5 } = {}) {
     // exit 3 = account/key problem the user must fix (SKILL.md contract)
     if (s === 402 || /insufficient (credits|balance|funds)/i.test(text)) throw fail('no-credits', s, outOfCredits(p, s), 3);
     if (s === 401 || s === 403) throw fail('key-rejected', s, `${p.name} rejected the API key (${s})${p.key_url ? `. Get a new one at ${p.key_url}` : ''} and run: node qs.mjs setup --provider ${p.name}`, 3);
-    if (s === 404) throw fail('model-unavailable', s, `${p.name} cannot serve model "${model}" (404): ${redact(clip(text, 300), p)}`, 4);
+    // ponytail: providers word "no such model" differently; a 400/422 naming the model as not found or
+    // unavailable is read as model-unavailable (falls back) rather than a bad request. Extend the words as seen.
+    if (s === 404 || ((s === 400 || s === 422) && /model/i.test(text) && /not found|not available|unavailable|unknown|not supported|not a valid|no endpoints|does not exist/i.test(text))) {
+      throw fail('model-unavailable', s, `${p.name} cannot serve model "${model}" (${s}): ${redact(clip(text, 300), p)}`, 4);
+    }
     if (s === 400 || s === 422) throw fail('request-rejected', s, `${p.name} rejected the request (${s}): ${redact(clip(text, 800), p)}`, 4);
     if (!(s === 408 || s === 409 || s === 429 || s >= 500)) throw fail('request-rejected', s, `${p.name} rejected the request (${s}): ${redact(clip(text, 300), p)}`, 4);
     last = fail(s === 429 ? 'rate-limited' : 'server-error', s, `${p.name} request failed: HTTP ${s}: ${redact(clip(text, 300), p)}`, 5);
@@ -704,6 +762,8 @@ function footer(t0, items, extra, outText, skipped) {
     ...(Object.keys(RUN.used).length ? [`via ${Object.entries(RUN.used).map(([k, n]) => (Object.keys(RUN.used).length > 1 ? `${k} ×${n}` : k)).join(', ')}`] : []),
     `~${fmtK(Math.max(0, saved))} Claude tokens not read`];
   let s = `— ${parts.join(' · ')}`;
+  const fb = Object.entries(RUN.fallbacks);
+  if (fb.length) s += `\n— fell back ${fb.reduce((a, [, n]) => a + n, 0)}×: ${fb.map(([k, n]) => (n > 1 ? `${k} ×${n}` : k)).join('; ')} (see ${ERRORS_LOG})`;
   if (skipped.length) s += `\n— skipped ${skipped.length}: ${clip(skipped.join(', '), 400)}`;
   recordStats({ requests: RUN.requests, items: items.length, jevTokens: RUN.jevTokens, cost: RUN.cost, saved });
   return s;
@@ -1132,7 +1192,11 @@ PROVIDERS  ~/.quicksilver/providers.json ($QUICKSILVER_HOME/providers.json;
         then the built-ins it does not name. "api_key" is "$VAR", "\${VAR}",
         a literal key (file must be chmod 600), or an array of these; a
         provider whose key is unset is skipped. "enabled": false (or no,
-        off, 0, disabled, inactive) turns one off. Run status to see the
+        off, 0, disabled, inactive) turns one off. A request that fails on a
+        rejected key, no credits, an unavailable model, 429 or 5xx/network
+        after retries moves to the next provider (never on a 400/422), and
+        the receipt says so; each error is logged to errors.log next to
+        providers.json (kept 72 hours, keys masked). Run status to see the
         chain. Example with every field: providers.example.json next to
         this script's folder.
 

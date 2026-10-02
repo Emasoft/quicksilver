@@ -1,7 +1,7 @@
 {
   "name": "quicksilver-skill",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Claude Code skill that hands bulk judgment calls (filter, classify, rank, find) to Jev: 86% fewer Claude tokens on benchmark, up to 20x faster.",
   "type": "module",
   "bin": {

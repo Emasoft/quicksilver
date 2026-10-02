@@ -18,6 +18,7 @@ const KEY = 'sk-fake-test-key';
 const reqs = []; // every request the mock received: { method, url, auth, body }
 let verifyStatus = 200; // status the mock returns on the key-verify GET
 let postStatus = 200; // status the mock returns on POST /v1/systemone
+let failFor = {}; // Authorization header -> [status, body]: POSTs sent with that key fail this way
 let server, port, BASE, TMP, QHOME;
 
 function mockAnswer(body) {
@@ -49,6 +50,9 @@ before(async () => {
       r.setHeader('content-type', 'application/json');
       if (q.method === 'GET') { r.statusCode = verifyStatus; return r.end('{"data":[]}'); }
       if (postStatus !== 200) { r.statusCode = postStatus; return r.end('{"error":"mock"}'); }
+      const f = failFor[q.headers.authorization];
+      // a tiny Retry-After keeps the 429/5xx retries of the fallback tests fast
+      if (f) { r.statusCode = f[0]; r.setHeader('retry-after', '0.001'); return r.end(f[1] ?? '{"error":"mock"}'); }
       r.end(JSON.stringify(mockAnswer(JSON.parse(b))));
     });
   });
@@ -76,6 +80,7 @@ beforeEach(() => {
   reqs.length = 0;
   verifyStatus = 200;
   postStatus = 200;
+  failFor = {};
   QHOME = fs.mkdtempSync(path.join(TMP, 'home-'));
   // typesafe points at the mock; no other provider has a key in childEnv, so the chain is just typesafe.
   writeProviders([{ name: 'typesafe', base_url: BASE }]);
@@ -1049,5 +1054,114 @@ describe('providers.json: where it is read from, and what replaced config.json',
       assert.equal(r.code, 3, r.stdout + r.stderr);
       assert.match(r.stdout, want);
     }
+  });
+});
+
+describe('fallback: a failing provider hands the request to the next one', () => {
+  const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
+  const LOG = () => path.join(QHOME, 'errors.log');
+  const logLines = () => fs.readFileSync(LOG(), 'utf8').trim().split('\n');
+  const chain = () => writeProviders([mock2(), { name: 'typesafe', base_url: BASE }]);
+  const auths = () => reqs.map((q) => q.auth);
+
+  const cases = [
+    ['key rejected', 401, undefined, /mock2 → typesafe \(key rejected, HTTP 401\)/],
+    ['out of credits', 402, undefined, /mock2 → typesafe \(out of credits, HTTP 402\)/],
+    ['insufficient credits in the body', 403, '{"error":"Insufficient credits"}', /mock2 → typesafe \(out of credits, HTTP 403\)/],
+    ['model unavailable', 404, undefined, /mock2 → typesafe \(model unavailable, HTTP 404\)/],
+    ['a 400 naming an unknown model', 400, '{"error":"model not found: m2"}', /mock2 → typesafe \(model unavailable, HTTP 400\)/],
+    ['rate limited after retries', 429, undefined, /mock2 → typesafe \(rate limited, HTTP 429\)/],
+    ['server error after retries', 503, undefined, /mock2 → typesafe \(server error, HTTP 503\)/],
+  ];
+  for (const [name, status, body, re] of cases) {
+    test(`${name}: the request is answered by the next provider and the footer says why`, async () => {
+      chain();
+      failFor['Bearer k2'] = [status, body];
+      const dir = mkdir({ 'a.txt': 'hello-a' });
+      const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { MOCK2_KEY: 'k2' } });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /0\.90 {2}a\.txt/);
+      assert.equal(auths().at(-1), `Bearer ${KEY}`);
+      assert.match(r.stdout, new RegExp(`fell back 1×: ${re.source}`));
+      assert.match(r.stdout, /via typesafe \(mock\)/);
+    });
+  }
+
+  test('errors.log gets one masked line per error event, 0600, naming the fallback target', async () => {
+    chain();
+    failFor['Bearer k2-secret'] = [401, '{"error":"bad key k2-secret"}'];
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { MOCK2_KEY: 'k2-secret' } });
+    assert.equal(r.code, 0, r.stderr);
+    const [line] = logLines();
+    assert.match(line, new RegExp(`^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d[+-]\\d\\d:\\d\\d quicksilver/${PKG_VERSION.replaceAll('.', '\\.')} provider=mock2 model=m2 kind=key-rejected status=401 fallback=typesafe msg=".+"$`));
+    assert.equal(logLines().length, 1);
+    assert.doesNotMatch(fs.readFileSync(LOG(), 'utf8'), /k2-secret/);
+    assert.equal(fs.statSync(LOG()).mode & 0o777, 0o600);
+  });
+
+  test('a failed provider is skipped for the rest of the run', async () => {
+    chain();
+    failFor['Bearer k2'] = [401];
+    const dir = mkdir({ 'a.txt': 'a', 'b.txt': 'b', 'c.txt': 'c' });
+    const r = await qs(['filter', 'q?', 'a.txt', 'b.txt', 'c.txt', '--concurrency', '1'], { cwd: dir, env: { MOCK2_KEY: 'k2' } });
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(auths(), ['Bearer k2', `Bearer ${KEY}`, `Bearer ${KEY}`, `Bearer ${KEY}`]);
+  });
+
+  test('a 400 request error does not fall back: exit 4, logged with fallback=no', async () => {
+    chain();
+    failFor['Bearer k2'] = [400, '{"error":"bad question"}'];
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { MOCK2_KEY: 'k2' } });
+    assert.equal(r.code, 4, r.stderr);
+    assert.deepEqual(auths(), ['Bearer k2']);
+    assert.match(logLines()[0], /provider=mock2 .*kind=request-rejected status=400 fallback=no /);
+  });
+
+  test('a pinned provider never falls back', async () => {
+    chain();
+    failFor['Bearer k2'] = [401];
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt', '--provider', 'mock2'], { cwd: dir, env: { MOCK2_KEY: 'k2' } });
+    assert.equal(r.code, 3, r.stderr);
+    assert.deepEqual(auths(), ['Bearer k2']);
+    assert.match(logLines()[0], /fallback=none-left/);
+  });
+
+  test('when every provider fails, the run exits with the last failure', async () => {
+    chain();
+    failFor['Bearer k2'] = [401];
+    failFor[`Bearer ${KEY}`] = [402];
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { MOCK2_KEY: 'k2' } });
+    assert.equal(r.code, 3, r.stderr);
+    assert.match(r.stderr, /every provider failed.*typesafe: out of credits/);
+    assert.equal(logLines().length, 2);
+  });
+
+  test('entries older than 72 hours are dropped when the log is written', async () => {
+    const old = `${new Date(Date.now() - 80 * 3600e3).toISOString()} quicksilver/0 provider=x kind=old`;
+    const recent = `${new Date(Date.now() - 3600e3).toISOString()} quicksilver/0 provider=x kind=recent`;
+    fs.writeFileSync(LOG(), `${old}\n${recent}\n`, { mode: 0o600 });
+    chain();
+    failFor['Bearer k2'] = [401];
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { MOCK2_KEY: 'k2' } });
+    const lines = logLines();
+    assert.equal(lines.length, 2);
+    assert.match(lines[0], /kind=recent/);
+    assert.match(lines[1], /kind=key-rejected/);
+  });
+
+  test('a log that cannot be written gives one warning and the run goes on', async () => {
+    fs.mkdirSync(LOG()); // a directory where the file should be
+    writeProviders([mock2(), mock2({ name: 'mock3', api_key: '$MOCK3_KEY' }), { name: 'typesafe', base_url: BASE }]);
+    failFor['Bearer k2'] = [401];
+    failFor['Bearer k3'] = [401];
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { MOCK2_KEY: 'k2', MOCK3_KEY: 'k3' } });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.stderr.match(/warning: could not write .*errors\.log/g)?.length, 1, r.stderr);
   });
 });
