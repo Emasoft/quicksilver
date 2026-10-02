@@ -164,16 +164,20 @@ function walk(dir, acc = []) {
   return acc;
 }
 
+// A symlink is returned as-is (lstat, not stat) so collect() reports it instead of following it:
+// stat would read the target, e.g. notes.txt -> ~/.aws/credentials from inside the repo.
+const fileOrLink = (f) => { try { const st = fs.lstatSync(f); return st.isFile() || st.isSymbolicLink(); } catch { return false; } };
+
 function expand(spec) {
   if (/[*?[\]{}]/.test(spec)) {
     if (!fs.globSync) die('glob patterns need Node 22+; pass a directory instead');
-    return fs.globSync(spec, { exclude: (p) => IGNORE_DIRS.has(path.basename(p)) }).filter((f) => fs.statSync(f).isFile());
+    return fs.globSync(spec, { exclude: (p) => IGNORE_DIRS.has(path.basename(p)) }).filter(fileOrLink);
   }
   if (!fs.existsSync(spec)) die(`no such file or directory: ${spec}`);
-  const st = fs.statSync(spec);
-  if (st.isFile()) return [spec];
+  const st = fs.lstatSync(spec);
+  if (st.isFile() || st.isSymbolicLink()) return [spec];
   const tracked = gitFiles(spec);
-  return (tracked?.length ? tracked : walk(spec)).filter((f) => { try { return fs.statSync(f).isFile(); } catch { return false; } });
+  return (tracked?.length ? tracked : walk(spec)).filter(fileOrLink);
 }
 
 function readText(file, maxBytes) {
@@ -227,6 +231,9 @@ function collect(pos, flags) {
     seen.add(abs);
     const r = rel(abs);
     if (exts && !exts.includes(path.extname(f).toLowerCase())) continue;
+    // Never follow a symlink, wherever it came from (git listing, glob, explicit path): its target can
+    // sit outside the input tree, and SECRET_RE only sees the link's own name.
+    if (fs.lstatSync(abs).isSymbolicLink()) { skipped.push(`${r} (symlink, never followed)`); continue; }
     if (!flags['no-secrets-guard'] && SECRET_RE.test(r)) { skipped.push(`${r} (secret-like, never sent)`); continue; }
     if (LOCK_RE.test(r)) continue;
     const text = readText(abs, 2 * 1024 * 1024);
