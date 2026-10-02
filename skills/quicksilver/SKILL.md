@@ -47,6 +47,9 @@ without the file it is openrouter, typesafe, compatible, cloudflare, vercel.
   to `~/.quicksilver/providers.json` (user-only permissions).
 - The order, disabled providers, saved keys and custom endpoints live in
   `~/.quicksilver/providers.json` (example: `<skill dir>/providers.example.json`).
+  A provider entry without `"enabled"` is on; `"enabled": false` (or `"no"`, `"off"`,
+  `0`, `"disabled"`, `"inactive"`, case-insensitive) turns it off: the chain skips it,
+  `qs status` shows it as `disabled`, and `--provider` naming it is an error.
   `--provider NAME` uses one provider only, with no fallback; when the file
   exists, NAME must be one of its entries. If a command says
   `config.json is no longer read`, tell the user what it says to move; don't
