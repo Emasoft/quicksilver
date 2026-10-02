@@ -1188,6 +1188,18 @@ describe('fallback: a failing provider hands the request to the next one', () =>
     assert.deepEqual(auths(), ['Bearer k2', `Bearer ${KEY}`, `Bearer ${KEY}`, `Bearer ${KEY}`]);
   });
 
+  test('circuit breaker: 10 parallel items and a rejected first provider make exactly 1 request to it', async () => {
+    chain();
+    failFor['Bearer k2'] = [401];
+    const files = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`f${i}.txt`, `item ${i}`]));
+    const dir = mkdir(files);
+    const r = await qs(['filter', 'q?', ...Object.keys(files)], { cwd: dir, env: { MOCK2_KEY: 'k2' } });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(auths().filter((a) => a === 'Bearer k2').length, 1);
+    assert.equal(auths().filter((a) => a === `Bearer ${KEY}`).length, 10);
+    assert.equal(logLines().length, 1);
+  });
+
   test('a 400 request error does not fall back: exit 4, logged with fallback=no', async () => {
     chain();
     failFor['Bearer k2'] = [400, '{"error":"bad question"}'];

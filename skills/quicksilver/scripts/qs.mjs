@@ -442,6 +442,7 @@ const ADAPTERS = {
 // Totals of the whole run, across providers, for the footer and stats.json.
 const RUN = { requests: 0, jevTokens: 0, cost: 0, costUnknown: false, used: {}, fallbacks: {}, lastError: null };
 const DEAD = new Set(); // providers that failed in this run: skipped by every later request
+const FIRST = new Map(); // provider name -> promise settled once the run's first request to it has an outcome
 const REASONS = { 'key-rejected': 'key rejected', 'no-credits': 'out of credits', 'model-unavailable': 'model unavailable',
   'rate-limited': 'rate limited', 'server-error': 'server error', network: 'network error', 'bad-response': 'unusable reply' };
 
@@ -454,6 +455,16 @@ async function jev(state, questions, specModel) {
   requireReady();
   for (const [i, p] of CHAIN.entries()) {
     if (DEAD.has(p.name)) continue;
+    // Circuit breaker: until a provider has answered once, the run's other requests wait for that first request
+    // instead of all going out in parallel. If it fails they skip the provider, so a rejected key or an empty
+    // wallet costs one request and one errors.log line, not one per item. ponytail: the first request to each
+    // provider is serialized (one round trip per provider per run).
+    const gate = FIRST.get(p.name);
+    let open;
+    if (gate) {
+      await gate;
+      if (DEAD.has(p.name)) continue;
+    } else FIRST.set(p.name, new Promise((res) => { open = res; }));
     const model = modelFor(p, specModel);
     let r;
     try { r = await callProvider(p, model, state, questions); } catch (e) {
@@ -469,6 +480,8 @@ async function jev(state, questions, specModel) {
         RUN.fallbacks[k] = (RUN.fallbacks[k] || 0) + 1;
       }
       continue;
+    } finally {
+      open?.(); // after the catch has marked a failed provider DEAD, so the waiters see it
     }
     RUN.requests += 1;
     RUN.jevTokens += r.usage.input_tokens;
