@@ -17,6 +17,7 @@ const KEY = 'sk-fake-test-key';
 
 const reqs = []; // every request the mock received: { method, url, auth, body }
 let verifyStatus = 200; // status the mock returns on the key-verify GET
+let postStatus = 200; // status the mock returns on POST /v1/systemone
 let server, port, BASE, TMP, QHOME;
 
 function mockAnswer(body) {
@@ -37,6 +38,7 @@ before(async () => {
       reqs.push({ method: q.method, url: q.url, auth: q.headers.authorization || '', body: b });
       r.setHeader('content-type', 'application/json');
       if (q.method === 'GET') { r.statusCode = verifyStatus; return r.end('{"data":[]}'); }
+      if (postStatus !== 200) { r.statusCode = postStatus; return r.end('{"error":"mock"}'); }
       r.end(JSON.stringify(mockAnswer(JSON.parse(b))));
     });
   });
@@ -55,6 +57,7 @@ after(() => {
 beforeEach(() => {
   reqs.length = 0;
   verifyStatus = 200;
+  postStatus = 200;
   QHOME = fs.mkdtempSync(path.join(TMP, 'home-'));
 });
 
@@ -316,5 +319,296 @@ describe('m6: a corrupt config or stats file is reported, not silently reset', (
     assert.equal(r.code, 1, r.stdout + r.stderr);
     assert.match(r.stderr, /stats\.json/);
     assert.equal(fs.readFileSync(path.join(QHOME, 'stats.json'), 'utf8'), '{bad');
+  });
+});
+
+const readCfg = () => JSON.parse(fs.readFileSync(path.join(QHOME, 'config.json'), 'utf8'));
+const writeCfg = (o) => fs.writeFileSync(path.join(QHOME, 'config.json'), JSON.stringify(o));
+
+describe('m5: stdin and --items reads are bounded', () => {
+  const big = 'x'.repeat(2 * 1024 * 1024 + 1);
+
+  test('stdin over 2 MB exits 1 without a request', async () => {
+    const r = await qs(['filter', 'q?', '-'], { input: big });
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /stdin/);
+    assert.equal(reqs.length, 0);
+  });
+
+  test('--items file over 2 MB exits 1 without a request', async () => {
+    const dir = mkdir({ 'i.txt': big });
+    const r = await qs(['filter', 'q?', '--items', 'i.txt'], { cwd: dir });
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /i\.txt/);
+    assert.equal(reqs.length, 0);
+  });
+
+  test('--limit stops before reading the files past the limit', async () => {
+    const dir = mkdir({ 'a.txt': 'a', 'b.txt': 'b', 'c.txt': 'c' }, { git: true });
+    fs.chmodSync(path.join(dir, 'c.txt'), 0o000); // reading it would crash with EACCES
+    const r = await qs(['filter', 'q?', '.', '--limit', '1'], { cwd: dir });
+    fs.chmodSync(path.join(dir, 'c.txt'), 0o644);
+    assert.equal(r.code, 1, r.stderr);
+    assert.match(r.stderr, /--limit 1/);
+    assert.equal(reqs.length, 0);
+  });
+});
+
+describe('m7: explicitly named input files get the secret guard too', () => {
+  const cases = [
+    ['--items .env', ['filter', 'q?', '--items', '.env']],
+    ['ask --state @.env', ['ask', 'q?', '--state', '@.env']],
+    ['ask secrets.json', ['ask', 'secrets.json']],
+    ['--labels-json @credentials.json', ['classify', '--labels-json', '@credentials.json', 'a.txt']],
+  ];
+  for (const [name, args] of cases) {
+    test(`${name} exits 1 without a request`, async () => {
+      const dir = mkdir({ '.env': 'TOKEN=CREDENTIAL-CONTENT', 'secrets.json': '{"state":"CREDENTIAL-CONTENT","questions":{"a":{"type":"noul","instructions":"q"}}}',
+        'credentials.json': '{"a":"CREDENTIAL-CONTENT","b":null}', 'a.txt': 'hello-a' });
+      const r = await qs(args, { cwd: dir });
+      assert.equal(r.code, 1, r.stdout + r.stderr);
+      assert.match(r.stderr, /secret/);
+      assert.equal(reqs.length, 0);
+    });
+  }
+
+  test('--no-secrets-guard sends an explicitly named secret file', async () => {
+    const dir = mkdir({ '.env': 'TOKEN=CREDENTIAL-CONTENT' });
+    const r = await qs(['filter', 'q?', '--items', '.env', '--no-secrets-guard'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(sent(), /CREDENTIAL-CONTENT/);
+  });
+});
+
+describe('nits: config and stats files', () => {
+  test('a failed stats write warns on stderr instead of being swallowed', async () => {
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    fs.chmodSync(QHOME, 0o500);
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir });
+    fs.chmodSync(QHOME, 0o700);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stderr, /warning: .*stats\.json/);
+  });
+
+  test('setup creates the config directory with mode 0700 and the config 0600', async () => {
+    const home = path.join(QHOME, 'fresh');
+    const r = await qs(['setup'], { env: { JEV_API_KEY: undefined, QUICKSILVER_HOME: home }, input: 'ts-key\n' });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(fs.statSync(home).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(path.join(home, 'config.json')).mode & 0o777, 0o600);
+    assert.deepEqual(fs.readdirSync(home), ['config.json']); // atomic write leaves no temp file behind
+  });
+});
+
+describe('review 1 and 7: provider errors map to exit 3', () => {
+  for (const [status, msg] of [[402, /credits/], [403, /rejected/]]) {
+    test(`filter on HTTP ${status} exits 3`, async () => {
+      postStatus = status;
+      const dir = mkdir({ 'a.txt': 'hello-a' });
+      const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir });
+      assert.equal(r.code, 3, r.stderr);
+      assert.match(r.stderr, msg);
+    });
+  }
+  for (const [status, msg] of [[402, /credits/], [403, /rejected/], [500, /HTTP 500/]]) {
+    test(`setup on HTTP ${status} exits 3`, async () => {
+      verifyStatus = status;
+      const r = await qs(['setup'], { env: { JEV_API_KEY: undefined }, input: 'ts-key\n' });
+      assert.equal(r.code, 3, r.stderr);
+      assert.match(r.stderr, msg);
+      assert.equal(fs.existsSync(path.join(QHOME, 'config.json')), false);
+    });
+  }
+});
+
+describe('review 2: --help/-h only as a real flag', () => {
+  test('-h as the value of --state is sent, not treated as help', async () => {
+    const r = await qs(['ask', 'q?', '--state', '-h']);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(sent(), /"state":"-h"/);
+  });
+
+  test('-h after -- is an input path, not help', async () => {
+    const r = await qs(['filter', 'q?', '--', '-h']);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /no such file or directory: -h/);
+  });
+
+  test('--labels -h is a label value, not help', async () => {
+    const r = await qs(['classify', '--labels', '-h', 'x']);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /2–255 labels/);
+  });
+
+  test('filter --help and filter -h still print help', async () => {
+    for (const h of ['--help', '-h']) {
+      const r = await qs(['filter', h]);
+      assert.equal(r.code, 0);
+      assert.match(r.stdout, /^quicksilver: hand bulk/);
+    }
+  });
+});
+
+describe('review 3: --provider= with no value', () => {
+  test('exits 1', async () => {
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt', '--provider='], { cwd: dir });
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /--provider needs a value/);
+    assert.equal(reqs.length, 0);
+  });
+});
+
+describe('review 4: installer passes --provider to its status pre-check', () => {
+  test('a saved typesafe key does not count as ready for --provider openrouter', async () => {
+    writeCfg({ provider: 'typesafe', api_key: KEY }); // legacy layout: every version reads it
+    const claude = fs.mkdtempSync(path.join(TMP, 'claude-'));
+    const r = await runNode(BIN, ['install', '--provider', 'openrouter'], { env: { CLAUDE_CONFIG_DIR: claude, JEV_API_KEY: undefined } });
+    assert.equal(r.code, 0, r.stderr);
+    assert.doesNotMatch(r.stdout, /provider typesafe/);
+    assert.match(r.stdout, /OPENROUTER_API_KEY/);
+  });
+});
+
+describe('review 5: a model id is used only with the provider it fits', () => {
+  test('an OpenRouter-style QUICKSILVER_MODEL is ignored on typesafe, with a warning', async () => {
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { QUICKSILVER_MODEL: '~typesafe/jev-latest' } });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(sent(), /"model":"jev-latest"/);
+    assert.match(r.stderr, /QUICKSILVER_MODEL/);
+  });
+
+  test('a saved model that does not fit the provider is ignored, with a warning', async () => {
+    writeCfg({ provider: 'typesafe', model: 'vendor/other-model', keys: { typesafe: KEY } });
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(sent(), /"model":"jev-latest"/);
+    assert.match(r.stderr, /vendor\/other-model/);
+  });
+
+  test('a fitting QUICKSILVER_MODEL is used silently', async () => {
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { QUICKSILVER_MODEL: 'jev-fast' } });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(sent(), /"model":"jev-fast"/);
+    assert.doesNotMatch(r.stderr, /warning/);
+  });
+});
+
+describe('review 6: one saved key per provider', () => {
+  test('setup for typesafe keeps a saved openrouter key and migrates the legacy layout', async () => {
+    writeCfg({ provider: 'openrouter', api_key: 'or-key' });
+    const r = await qs(['setup'], { env: { JEV_API_KEY: undefined }, input: 'ts-key\n' });
+    assert.equal(r.code, 0, r.stderr);
+    const cfg = readCfg();
+    assert.deepEqual(cfg.keys, { openrouter: 'or-key', typesafe: 'ts-key' });
+    assert.equal(cfg.api_key, undefined);
+    assert.equal(cfg.provider, 'typesafe');
+  });
+
+  test('setup --remove removes only the active provider key', async () => {
+    writeCfg({ provider: 'typesafe', keys: { typesafe: 'ts-key', openrouter: 'or-key' } });
+    const r = await qs(['setup', '--remove']);
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(readCfg().keys, { openrouter: 'or-key' });
+  });
+
+  test('a legacy config key is still used before any write', async () => {
+    writeCfg({ provider: 'typesafe', api_key: 'legacy-key' });
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { JEV_API_KEY: undefined } });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(reqs[0].auth, 'Bearer legacy-key');
+  });
+
+  test('the saved key of the active provider is used', async () => {
+    writeCfg({ provider: 'typesafe', keys: { typesafe: 'ts-key', openrouter: 'or-key' } });
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { JEV_API_KEY: undefined } });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(reqs[0].auth, 'Bearer ts-key');
+  });
+});
+
+describe('--follow-symlinks: opt-in, still guarded', () => {
+  let outside, repo;
+  before(() => {
+    outside = mkdir({ 'shared.txt': 'OUTSIDE-SHARED', 'id_rsa': 'PRIVATE-KEY-CONTENT' });
+    repo = mkdir({ 'a.txt': 'inside-a' }, { git: true });
+    fs.symlinkSync(path.join(outside, 'shared.txt'), path.join(repo, 'notes.txt'));
+    fs.symlinkSync(path.join(outside, 'id_rsa'), path.join(repo, 'harmless.txt'));
+    fs.symlinkSync(path.join(repo, 'a.txt'), path.join(repo, 'alias.txt'));
+  });
+
+  test('a link to a normal outside file is sent with the flag', async () => {
+    const r = await qs(['filter', 'q?', '.', '--follow-symlinks'], { cwd: repo });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(sent(), /OUTSIDE-SHARED/);
+  });
+
+  test('QUICKSILVER_FOLLOW_SYMLINKS=1 works like the flag', async () => {
+    const r = await qs(['filter', 'q?', '.'], { cwd: repo, env: { QUICKSILVER_FOLLOW_SYMLINKS: '1' } });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(sent(), /OUTSIDE-SHARED/);
+  });
+
+  test('a link whose target looks like a secret is still refused', async () => {
+    const r = await qs(['filter', 'q?', '.', '--follow-symlinks'], { cwd: repo });
+    assert.doesNotMatch(sent(), /PRIVATE-KEY-CONTENT/);
+    assert.match(r.stdout, /harmless\.txt \(secret-like, never sent\)/);
+  });
+
+  test('a link and its target are sent once', async () => {
+    await qs(['filter', 'q?', '.', '--follow-symlinks'], { cwd: repo });
+    assert.equal(sent().match(/inside-a/g).length, 1);
+  });
+
+  test('a symlink loop terminates', async () => {
+    const dir = mkdir({ 'sub/x.txt': 'loop-content' });
+    fs.symlinkSync(dir, path.join(dir, 'sub', 'back'));
+    const r = await qs(['filter', 'q?', 'sub', '--follow-symlinks'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(sent().match(/loop-content/g).length, 1);
+  });
+});
+
+describe('installer: stale files and dev install script', () => {
+  test('install replaces the old skill copy, so stale files do not linger', async () => {
+    const claude = fs.mkdtempSync(path.join(TMP, 'claude-'));
+    const stale = path.join(claude, 'skills', 'quicksilver', 'scripts', 'stale.mjs');
+    fs.mkdirSync(path.dirname(stale), { recursive: true });
+    fs.writeFileSync(stale, '');
+    const r = await runNode(BIN, ['install'], { env: { CLAUDE_CONFIG_DIR: claude } });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(fs.existsSync(stale), false);
+    assert.ok(fs.existsSync(path.join(claude, 'skills', 'quicksilver', 'scripts', 'qs.mjs')));
+  });
+
+  const devInstall = (dir, args = []) => new Promise((resolve) => {
+    const child = spawn('sh', [path.join(ROOT, 'install-dev.sh'), '--dry-run', ...args], { env: { PATH: process.env.PATH, HOME: QHOME, QUICKSILVER_DEV_DIR: dir } });
+    let out = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.stderr.on('data', (d) => (out += d));
+    child.on('close', (code) => resolve({ code, out }));
+  });
+  const clone = (origin, branch) => {
+    const dir = mkdir({ 'f.txt': 'x' }, { git: true });
+    const g = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: dir, stdio: 'ignore' });
+    g('checkout', '-q', '-b', branch); g('add', 'f.txt'); g('commit', '-q', '-m', 'x'); g('remote', 'add', 'origin', origin);
+    return dir;
+  };
+
+  test('install-dev.sh accepts an SSH clone of the fork', async () => {
+    const r = await devInstall(clone('git@github.com:Emasoft/quicksilver.git', 'main'));
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /would run: git .* pull --ff-only/);
+  });
+
+  test('install-dev.sh refuses a clone that is not on main', async () => {
+    const r = await devInstall(clone('https://github.com/Emasoft/quicksilver.git', 'feature'));
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /not on main/);
   });
 });
