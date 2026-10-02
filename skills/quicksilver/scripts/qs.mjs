@@ -198,8 +198,9 @@ function expand(spec) {
   if (!fs.existsSync(spec)) die(`no such file or directory: ${spec}`);
   const st = fs.lstatSync(spec);
   if (st.isFile() || st.isSymbolicLink()) return [spec];
-  const tracked = gitFiles(spec);
-  return (tracked?.length ? tracked : walk(spec)).filter(fileOrLink);
+  // Walk only outside git (null). An empty list means "inside git, everything ignored": walking it
+  // would send exactly the gitignored files .gitignore is documented to keep out (audit m1).
+  return (gitFiles(spec) ?? walk(spec)).filter(fileOrLink);
 }
 
 function readText(file, maxBytes) {
