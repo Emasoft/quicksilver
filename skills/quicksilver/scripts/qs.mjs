@@ -26,6 +26,8 @@ const IGNORE_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', '.n
 // kube, postgres and htpasswd credentials, terraform vars/state, App Store .p8 and PuTTY keys, KeePass vaults,
 // VPN profiles, GPG files and cloud service-account keys: all were sent before (audit M2).
 const SECRET_RE = /(^|[/\\])(\.env(\..*)?|\.envrc|.*\.(pem|key|p12|pfx|keystore|jks|crt|cer|p8|ppk|kdbx|ovpn|gpg|tfvars|tfstate(\.backup)?)|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|\.npmrc|\.pypirc|\.netrc|\.git-credentials|\.pgpass|\.htpasswd|\.dockercfg|kubeconfig|\.docker[/\\]config\.json|service-account[^/\\]*\.json|credentials(\.json)?|secrets?\.(json|ya?ml|toml))$/i;
+// Per-input byte cap for files, stdin and --items: larger inputs are skipped (scanned files) or refused.
+const MAX_BYTES = 2 * 1024 * 1024;
 const LOCK_RE = /(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|poetry\.lock|composer\.lock|\.min\.(js|css)|\.map)$/i;
 
 // ---------- args ----------
@@ -225,8 +227,29 @@ function readText(file, maxBytes) {
   return buf.toString('utf8');
 }
 
+// Read in chunks and stop past MAX_BYTES: readFileSync(0) buffered any amount of piped input (audit m5).
 function readStdin() {
-  try { return fs.readFileSync(0, 'utf8'); } catch { return ''; }
+  const chunks = [], buf = Buffer.alloc(65536);
+  let total = 0;
+  for (;;) {
+    let n;
+    try { n = fs.readSync(0, buf, 0, buf.length, null); } catch (e) {
+      if (e.code === 'EAGAIN') continue; // non-blocking TTY: no data yet
+      if (e.code === 'EOF') break; // Windows pipe end
+      throw e;
+    }
+    if (n === 0) break;
+    total += n;
+    if (total > MAX_BYTES) die(`stdin is over ${MAX_BYTES / 1048576} MB; pass files instead, or split the input`);
+    chunks.push(Buffer.from(buf.subarray(0, n)));
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+// A file the user named for --items, --state @f, ask spec.json or --labels-json @f.
+function readInputFile(file) {
+  if (fs.statSync(file).size > MAX_BYTES) die(`${file} is over ${MAX_BYTES / 1048576} MB; split it`);
+  return fs.readFileSync(file, 'utf8');
 }
 
 // Returns [{id, text, truncated}] plus a list of skipped paths.
@@ -234,14 +257,17 @@ function collect(pos, flags) {
   const maxChars = num(flags['max-chars'], 60000);
   const exts = flags.ext ? String(flags.ext).split(',').map((e) => '.' + e.replace(/^\./, '').toLowerCase()) : null;
   const items = [], skipped = [];
+  const limit = num(flags.limit, 5000);
   const push = (id, text) => {
+    // Checked per item, so a run over --limit stops before reading the rest of the input (audit m5).
+    if (items.length >= limit) die(`more than ${limit} items (--limit ${limit}). Narrow the input or raise --limit.`);
     const truncated = text.length > maxChars;
     items.push({ id, text: truncated ? text.slice(0, maxChars) : text, truncated });
   };
   const pushLines = (name, text) => text.split(/\r?\n/).forEach((l, i) => { if (l.trim()) push(`${name}:${i + 1}`, l); });
 
   if (flags.items) {
-    const raw = flags.items === '-' ? readStdin() : fs.readFileSync(flags.items, 'utf8');
+    const raw = flags.items === '-' ? readStdin() : readInputFile(flags.items);
     for (const [i, line] of raw.split(/\r?\n/).entries()) {
       if (!line.trim()) continue;
       // A line that opens an object must be valid JSON: falling back to plain text (as before) silently
@@ -271,13 +297,11 @@ function collect(pos, flags) {
     if (fs.lstatSync(abs).isSymbolicLink()) { skipped.push(`${r} (symlink, never followed)`); continue; }
     if (!flags['no-secrets-guard'] && SECRET_RE.test(r)) { skipped.push(`${r} (secret-like, never sent)`); continue; }
     if (LOCK_RE.test(r)) continue;
-    const text = readText(abs, 2 * 1024 * 1024);
+    const text = readText(abs, MAX_BYTES);
     if (text === null) { skipped.push(`${r} (binary or >2MB)`); continue; }
     if (!text.trim()) continue;
     flags.lines ? pushLines(r, text) : push(r, text);
   }
-  const limit = num(flags.limit, 5000);
-  if (items.length > limit) die(`${items.length} items exceeds --limit ${limit}. Narrow the input or raise --limit.`);
   return { items, skipped };
 }
 
@@ -416,7 +440,7 @@ async function cmdFilter({ pos, flags }) {
 function parseLabels(flags) {
   if (flags['labels-json']) {
     const raw = String(flags['labels-json']);
-    return parseJson(raw.startsWith('@') ? fs.readFileSync(raw.slice(1), 'utf8') : raw, '--labels-json');
+    return parseJson(raw.startsWith('@') ? readInputFile(raw.slice(1)) : raw, '--labels-json');
   }
   if (!flags.labels) die('classify needs --labels "a,b,c" or --labels-json \'{"a":"description"}\'');
   return Object.fromEntries(String(flags.labels).split(',').map((s) => s.trim()).filter(Boolean).map((l) => {
@@ -550,7 +574,7 @@ function fmtAnswer(id, a) {
 function readStateArg(v) {
   if (v === undefined) return undefined;
   if (v === '-') return readStdin();
-  if (typeof v === 'string' && v.startsWith('@')) return fs.readFileSync(v.slice(1), 'utf8');
+  if (typeof v === 'string' && v.startsWith('@')) return readInputFile(v.slice(1));
   return v;
 }
 
@@ -559,7 +583,7 @@ async function cmdAsk({ pos, flags }) {
   let body;
   const first = pos[0];
   if (first && (first === '-' || first.endsWith('.json')) && !flags.state) {
-    body = parseJson(first === '-' ? readStdin() : fs.readFileSync(first, 'utf8'), first === '-' ? 'ask spec on stdin' : first);
+    body = parseJson(first === '-' ? readStdin() : readInputFile(first), first === '-' ? 'ask spec on stdin' : first);
   } else {
     const question = pos.join(' ');
     if (!question) die('usage: ask "<question>" --state @file|text|- [--choice "a,b" | --score "low|mid|high"]  or  ask spec.json');
