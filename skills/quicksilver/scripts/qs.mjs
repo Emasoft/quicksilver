@@ -30,8 +30,14 @@ const SECRET_RE = /(^|[/\\])(\.env(\..*)?|\.envrc|.*\.(pem|key|p12|pfx|keystore|
 // User decision: no default limit, any size is read; --max-bytes / QUICKSILVER_MAX_BYTES is an opt-in lower
 // cap. The fixed 100 MB ceiling only keeps one huge input from hanging the machine and cannot be raised.
 const HARD_MAX_BYTES = 100 * 1024 * 1024;
-let MAX_BYTES = HARD_MAX_BYTES; // set per command by resolveMaxBytes()
+let MAX_BYTES = HARD_MAX_BYTES; // set per command from --max-bytes / QUICKSILVER_MAX_BYTES
 const fmtBytes = (n) => (n % 1048576 === 0 ? `${n / 1048576} MB` : `${n} bytes`);
+// User decision: nothing sent to Jev is truncated. An item longer than one chunk is split into chunks that fit
+// Jev's 32k-token context next to the question, state wrapper and schema: 60k chars is about 15-20k tokens, and
+// the 90k ceiling stays under the context even at ~3 chars per token (dense code or JSON).
+const CHUNK_CHARS_MAX = 90000;
+const CHUNK_OVERLAP = 500; // repeated at each boundary, so a match that straddles it is whole in one chunk
+let CHUNK_CHARS = 60000; // set per command from --chunk-chars / QUICKSILVER_CHUNK_CHARS
 const LOCK_RE = /(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|poetry\.lock|composer\.lock|\.min\.(js|css)|\.map)$/i;
 
 // ---------- args ----------
@@ -60,7 +66,7 @@ const die = (msg, code = 1) => { process.stderr.write(`quicksilver: ${msg}\n`); 
 // [min, max, integer]
 const NUM_FLAGS = {
   concurrency: [1, Infinity, true], limit: [1, Infinity, true], top: [1, Infinity, true], chunk: [1, Infinity, true],
-  width: [1, Infinity, true], 'max-chars': [1, Infinity, true], 'pack-items': [1, Infinity, true], 'pack-tokens': [1, Infinity, true],
+  width: [1, Infinity, true], 'chunk-chars': [1000, CHUNK_CHARS_MAX, true], 'pack-items': [1, Infinity, true], 'pack-tokens': [1, Infinity, true],
   'max-bytes': [1, HARD_MAX_BYTES, true],
   threshold: [0, 1], band: [0, 1], 'min-confidence': [0, 1], 'min-score': [0, 1],
 };
@@ -76,13 +82,14 @@ function checkNums(flags) {
   }
 }
 const num = (v, d) => v ?? d; // v is already a checked number (checkNums) or undefined
-// --max-bytes (already checked) beats QUICKSILVER_MAX_BYTES, which is validated here with the same bounds.
-function resolveMaxBytes(flags) {
-  if (flags['max-bytes'] !== undefined) return flags['max-bytes'];
-  const v = process.env.QUICKSILVER_MAX_BYTES;
-  if (v === undefined || v === '') return HARD_MAX_BYTES;
+// A numeric flag (already checked) beats its environment variable, which is validated here with the same bounds.
+function flagOrEnv(flags, name, env, fallback) {
+  if (flags[name] !== undefined) return flags[name];
+  const v = process.env[env];
+  if (v === undefined || v === '') return fallback;
+  const [min, max] = NUM_FLAGS[name];
   const n = Number(v);
-  if (!Number.isInteger(n) || n < 1 || n > HARD_MAX_BYTES) die(`QUICKSILVER_MAX_BYTES needs a whole number from 1 to ${HARD_MAX_BYTES} (the 100 MB hard cap), got "${v}"`);
+  if (!Number.isInteger(n) || n < min || n > max) die(`${env} needs a whole number from ${min} to ${max}, got "${v}"`);
   return n;
 }
 // Malformed user JSON is a usage error (exit 1), not an "unexpected error" stack with exit 5 (audit m4).
@@ -320,17 +327,15 @@ function readInputFile(file, flags) {
   return fs.readFileSync(file, 'utf8');
 }
 
-// Returns [{id, text, truncated}] plus a list of skipped paths.
+// Returns [{id, text}] plus a list of skipped paths. Texts are whole: runPerItem chunks the long ones.
 function collect(pos, flags) {
-  const maxChars = num(flags['max-chars'], 60000);
   const exts = flags.ext ? String(flags.ext).split(',').map((e) => '.' + e.replace(/^\./, '').toLowerCase()) : null;
   const items = [], skipped = [];
   const limit = num(flags.limit, 5000);
   const push = (id, text) => {
     // Checked per item, so a run over --limit stops before reading the rest of the input (audit m5).
     if (items.length >= limit) die(`more than ${limit} items (--limit ${limit}). Narrow the input or raise --limit.`);
-    const truncated = text.length > maxChars;
-    items.push({ id, text: truncated ? text.slice(0, maxChars) : text, truncated });
+    items.push({ id, text });
   };
   const pushLines = (name, text) => text.split(/\r?\n/).forEach((l, i) => { if (l.trim()) push(`${name}:${i + 1}`, l); });
 
@@ -397,24 +402,70 @@ function batches(items, flags) {
   return out;
 }
 
-// Run one question per item. makeQ(ref, packed) builds the question; ref is how the item is addressed in state.
+const countNl = (s, from, to) => { let n = 0; for (let i = s.indexOf('\n', from); i !== -1 && i < to; i = s.indexOf('\n', i + 1)) n++; return n; };
+
+// Splits text into pieces of at most CHUNK_CHARS chars, each cut after a newline when one lies past the overlap
+// (only a single over-long line is split mid-line). Every piece after the first restarts CHUNK_OVERLAP chars
+// before the previous end, at a line start when possible. from/to are the 1-based lines a piece covers.
+function chunkText(text) {
+  const out = [];
+  let start = 0, line = 1;
+  for (;;) {
+    let end = Math.min(start + CHUNK_CHARS, text.length);
+    if (end < text.length) {
+      const nl = text.lastIndexOf('\n', end - 1);
+      if (nl >= start + CHUNK_OVERLAP) end = nl + 1;
+    }
+    out.push({ text: text.slice(start, end), from: line, to: line + countNl(text, start, end - 1) });
+    if (end >= text.length) return out;
+    let next = end - CHUNK_OVERLAP; // end - start > CHUNK_OVERLAP, so every step moves forward
+    const nl = text.indexOf('\n', next);
+    if (nl !== -1 && nl < end - 1) next = nl + 1;
+    line += countNl(text, start, next);
+    start = next;
+  }
+}
+
+// User decision: the highest-scoring chunk decides a per-item judgement, never an average ("it should consider
+// the higest scored chunk to decide if the file passes or not or to give a rating"): yes/no by the highest
+// probability, a score by the highest score, a label by the most confident chunk. Ties go to the earliest chunk
+// (strict >). The deciding chunk is reported as best_chunk and, for text, best_lines.
+function mergeChunks(parts) {
+  if (parts.length === 1) return parts[0].answer;
+  const key = { noul: 'noul', score: 'score' }[parts[0].answer.type] ?? 'confidence';
+  const val = (p) => p.answer[key] ?? -Infinity; // a null confidence never beats a real one
+  const best = parts.reduce((x, y) => (val(y) > val(x) ? y : x));
+  return { ...best.answer, best_chunk: parts.indexOf(best) + 1, ...(best.from ? { best_lines: [best.from, best.to] } : {}) };
+}
+
+// Run one question per item, or per chunk of a long item, then merge the chunk answers back into one row per
+// item. makeQ(ref, packed) builds the question; ref is how the unit is addressed in state.
 async function runPerItem(items, flags, makeQ) {
   const model = modelName(flags);
-  const groups = batches(items, flags);
+  const units = items.flatMap((item) => {
+    const cs = chunkText(item.text);
+    item.chunks = cs.length;
+    return cs.map((c) => ({ item, ...c, source: cs.length > 1 ? `${item.id} (lines ${c.from}-${c.to})` : item.id }));
+  });
+  const groups = batches(units, flags);
   const stats = { requests: groups.length, jevTokens: 0, cost: 0 };
-  const results = await pool(groups.map((g) => async () => {
+  const answered = await pool(groups.map((g) => async () => {
     const packed = g.length > 1;
     const state = packed
-      ? { items: Object.fromEntries(g.map((it, j) => [`i${j}`, { source: it.id, content: it.text }])) }
-      : { source: g[0].id, content: g[0].text };
+      ? { items: Object.fromEntries(g.map((u, j) => [`i${j}`, { source: u.source, content: u.text }])) }
+      : { source: g[0].source, content: g[0].text };
     const questions = Object.fromEntries(g.map((_, j) => [`q${j}`, makeQ(packed ? `\`items.i${j}\`` : '`content`', packed)]));
     const res = await http('POST', '/v1/systemone', { model, state, questions });
     stats.jevTokens += res.usage?.input_tokens || 0;
     stats.cost += costOf(res.usage);
-    stats.model = res.model;
-    return g.map((it, j) => ({ item: it, answer: res.answers[`q${j}`] }));
+    return g.map((u, j) => ({ u, answer: res.answers[`q${j}`] }));
   }), num(flags.concurrency, 16));
-  return { rows: results.flat(), stats };
+  const parts = new Map(); // item -> its chunk answers, in chunk order (pool keeps the order of groups)
+  for (const { u, answer } of answered.flat()) {
+    if (!parts.has(u.item)) parts.set(u.item, []);
+    parts.get(u.item).push({ answer, from: u.from, to: u.to });
+  }
+  return { rows: [...parts].map(([item, ps]) => ({ item, answer: mergeChunks(ps) })), stats };
 }
 
 // ---------- output ----------
@@ -439,9 +490,13 @@ function emit(flags, jsonObj, lines, foot) {
   process.stdout.write((body ? body + '\n' : '') + foot + '\n');
 }
 
-function label(it, flags) {
-  const t = it.truncated ? '~' : '';
-  return flags.lines || flags.items ? `${it.id}${t}  ${clip(it.text.trim().replace(/\s+/g, ' '), num(flags.width, 160))}` : `${it.id}${t}`;
+// A chunked item names how many chunks it had and which lines decided its verdict (see mergeChunks).
+const chunkNote = (r) => (r.item.chunks > 1 ? ` (${r.item.chunks} chunks, best lines ${r.answer.best_lines.join('-')})` : '');
+const chunkJson = (r) => ({ chunks: r.item.chunks, ...(r.answer.best_lines ? { best_lines: r.answer.best_lines } : {}) });
+
+function label(r, flags) {
+  const it = r.item;
+  return flags.lines || flags.items ? `${it.id}${chunkNote(r)}  ${clip(it.text.trim().replace(/\s+/g, ' '), num(flags.width, 160))}` : `${it.id}${chunkNote(r)}`;
 }
 
 function requireInputs(items, cmd) {
@@ -468,7 +523,7 @@ function ranges(nums, max) {
 }
 
 function renderRows(rs, flags, score) {
-  if (!flags.lines || flags['no-collapse']) return rs.map((r) => `${f2(score(r))}  ${label(r.item, flags)}`);
+  if (!flags.lines || flags['no-collapse']) return rs.map((r) => `${f2(score(r))}  ${label(r, flags)}`);
   const groups = new Map();
   for (const r of rs) {
     const k = template(r.item.text);
@@ -476,9 +531,9 @@ function renderRows(rs, flags, score) {
     groups.get(k).push(r);
   }
   return [...groups.values()].map((g) => {
-    if (g.length === 1) return `${f2(score(g[0]))}  ${label(g[0].item, flags)}`;
+    if (g.length === 1) return `${f2(score(g[0]))}  ${label(g[0], flags)}`;
     const rest = g.slice(1).map((r) => Number(r.item.id.split(':').pop())).sort((a, b) => a - b);
-    return `${f2(score(g[0]))}  ×${g.length}  ${label(g[0].item, flags)}\n        also lines ${ranges(rest, 300)}`;
+    return `${f2(score(g[0]))}  ×${g.length}  ${label(g[0], flags)}\n        also lines ${ranges(rest, 300)}`;
   });
 }
 
@@ -509,9 +564,9 @@ async function cmdFilter({ pos, flags }) {
     ...(unsure.length ? [`? borderline (${f2(thr - band)}–${f2(thr + band)}) — check these yourself:`, ...renderRows(unsure, flags, p)] : []),
   ];
   if (!sure.length && !unsure.length) lines.push('(no matches)');
-  const saved = save(flags, rows.map((r) => ({ id: r.item.id, p: p(r) })));
+  const saved = save(flags, rows.map((r) => ({ id: r.item.id, p: p(r), ...chunkJson(r) })));
   const foot = footer(t0, items, [`${hits.length} matched`, `${unsure.length} borderline`], stats, lines.join('\n'), skipped) + saved;
-  emit(flags, { matched: hits.map((r) => ({ id: r.item.id, p: p(r) })), borderline: unsure.map((r) => ({ id: r.item.id, p: p(r) })) }, lines, foot);
+  emit(flags, { matched: hits.map((r) => ({ id: r.item.id, p: p(r), ...chunkJson(r) })), borderline: unsure.map((r) => ({ id: r.item.id, p: p(r), ...chunkJson(r) })) }, lines, foot);
 }
 
 function parseLabels(flags) {
@@ -553,7 +608,7 @@ async function cmdClassify({ pos, flags }) {
     const g = groups[k].sort((a, b) => b.answer.confidence - a.answer.confidence);
     if (flags.verbose) {
       lines.push(`[${k}]`);
-      for (const r of g) lines.push(`${r.answer.confidence < minConf ? '?' : ' '}${f2(r.answer.confidence)}  ${label(r.item, flags)}`);
+      for (const r of g) lines.push(`${r.answer.confidence < minConf ? '?' : ' '}${f2(r.answer.confidence)}  ${label(r, flags)}`);
     } else {
       const ok = g.filter((r) => r.answer.confidence >= minConf).map((r) => r.item.id);
       if (ok.length) lines.push(`[${k}] ${ok.join(' ')}`);
@@ -566,9 +621,9 @@ async function cmdClassify({ pos, flags }) {
       lines.push(`?${f2(r.answer.confidence)}  ${r.answer.choice} (or ${second?.[0]})  ${r.item.id}  ${clip(r.item.text.trim().replace(/\s+/g, ' '), num(flags.width, 160))}`);
     }
   }
-  const saved = save(flags, rows.map((r) => ({ id: r.item.id, label: r.answer.choice, confidence: r.answer.confidence })));
+  const saved = save(flags, rows.map((r) => ({ id: r.item.id, label: r.answer.choice, confidence: r.answer.confidence, ...chunkJson(r) })));
   const foot = footer(t0, items, [`${low.length} low-confidence (?)`], stats, lines.join('\n'), skipped) + saved;
-  emit(flags, rows.map((r) => ({ id: r.item.id, label: r.answer.choice, confidence: r.answer.confidence, probabilities: r.answer.probabilities })), lines, foot);
+  emit(flags, rows.map((r) => ({ id: r.item.id, label: r.answer.choice, confidence: r.answer.confidence, probabilities: r.answer.probabilities, ...chunkJson(r) })), lines, foot);
 }
 
 const RANK_LEVELS = [
@@ -593,9 +648,9 @@ async function cmdRank({ pos, flags }) {
   const top = num(flags.top, 10), max = RANK_LEVELS.length - 1;
   rows.sort((a, b) => b.answer.score - a.answer.score);
   const shown = flags.all ? rows : rows.slice(0, top);
-  const lines = shown.map((r) => `${f2(r.answer.score / max)}  ${label(r.item, flags)}`);
+  const lines = shown.map((r) => `${f2(r.answer.score / max)}  ${label(r, flags)}`);
   const foot = footer(t0, items, [`top ${shown.length}`], stats, lines.join('\n'), skipped);
-  emit(flags, shown.map((r) => ({ id: r.item.id, relevance: r.answer.score / max, confidence: r.answer.confidence })), lines, foot);
+  emit(flags, shown.map((r) => ({ id: r.item.id, relevance: r.answer.score / max, confidence: r.answer.confidence, ...chunkJson(r) })), lines, foot);
 }
 
 async function cmdFind({ pos, flags }) {
@@ -604,16 +659,28 @@ async function cmdFind({ pos, flags }) {
   const t0 = Date.now();
   const model = modelName(flags);
   const chunkLines = Math.min(num(flags.chunk, 150), 250);
-  const { items: files, skipped } = collect(pos, { ...flags, lines: false, 'max-chars': Infinity });
+  const { items: files, skipped } = collect(pos, { ...flags, lines: false });
   requireInputs(files, 'find');
   const chunks = [];
   for (const f of files) {
-    const all = f.text.split(/\r?\n/).map((t, i) => [String(i + 1), t]).filter(([, t]) => t.trim());
-    for (let i = 0; i < all.length; i += chunkLines) chunks.push({ file: f.id, lines: all.slice(i, i + chunkLines) });
+    // Every non-blank line is sent whole (it used to be clipped to 400 chars). A line longer than a chunk is
+    // split into pieces keyed 12, 12.2, 12.3, ..., and a request holds at most --chunk lines and CHUNK_CHARS
+    // chars, so no request can overflow Jev's context.
+    const all = [];
+    for (const [i, t] of f.text.split(/\r?\n/).entries()) {
+      if (t.trim()) for (const [k, c] of chunkText(t).entries()) all.push([k ? `${i + 1}.${k + 1}` : String(i + 1), c.text]);
+    }
+    let cur = [], size = 0;
+    for (const l of all) {
+      if (cur.length && (cur.length >= chunkLines || size + l[1].length > CHUNK_CHARS)) { chunks.push({ file: f.id, lines: cur }); cur = []; size = 0; }
+      cur.push(l);
+      size += l[1].length;
+    }
+    if (cur.length) chunks.push({ file: f.id, lines: cur });
   }
   const stats = { requests: chunks.length, jevTokens: 0, cost: 0 };
   const perChunk = await pool(chunks.map((c) => async () => {
-    const lines = Object.fromEntries(c.lines.map(([n, t]) => [n, clip(t, 400)]));
+    const lines = Object.fromEntries(c.lines);
     const res = await http('POST', '/v1/systemone', {
       model,
       state: { query, lines },
@@ -631,10 +698,12 @@ async function cmdFind({ pos, flags }) {
     const ex = res.answers.exists.noul;
     return Object.entries(res.answers.where.probabilities)
       .filter(([n]) => n !== 'none')
-      .map(([n, p]) => ({ file: c.file, line: n, text: lines[n], score: p * ex }));
+      .map(([n, p]) => ({ file: c.file, line: n.split('.')[0], text: lines[n], score: p * ex }));
   }), num(flags.concurrency, 16));
   const top = num(flags.top, 5), minScore = num(flags['min-score'], 0.05);
-  const hits = perChunk.flat().filter((h) => h.score >= minScore).sort((a, b) => b.score - a.score).slice(0, top);
+  const seen = new Set(); // pieces of one split line, and overlapping pieces, report that line once (best first)
+  const hits = perChunk.flat().filter((h) => h.score >= minScore).sort((a, b) => b.score - a.score)
+    .filter((h) => !seen.has(`${h.file}:${h.line}`) && seen.add(`${h.file}:${h.line}`)).slice(0, top);
   const out = hits.map((h) => `${f2(h.score)}  ${h.file}:${h.line}  ${clip(h.text.trim(), num(flags.width, 160))}`);
   if (!out.length) out.push('(no matching lines)');
   const foot = footer(t0, files, [`${chunks.length} chunks`], stats, out.join('\n'), skipped);
@@ -642,11 +711,13 @@ async function cmdFind({ pos, flags }) {
 }
 
 function fmtAnswer(id, a) {
-  if (a.type === 'noul') return `${id}  noul ${f2(a.noul)}`;
-  if (a.type === 'choice') return `${id}  choice ${a.choice} (conf ${f2(a.confidence)})`;
+  // the chunk that decided a chunked answer (mergeChunks)
+  const by = a.best_chunk ? ` [chunk ${a.best_chunk}${a.best_lines ? `, lines ${a.best_lines.join('-')}` : ''}]` : '';
+  if (a.type === 'noul') return `${id}  noul ${f2(a.noul)}${by}`;
+  if (a.type === 'choice') return `${id}  choice ${a.choice} (conf ${f2(a.confidence)})${by}`;
   if (a.type === 'score') {
     const lvl = a.legend?.[String(Math.round(a.score))];
-    return `${id}  score ${f2(a.score)}/${Object.keys(a.legend || {}).length - 1}${lvl ? ` "${clip(lvl, 60)}"` : ''} (conf ${f2(a.confidence)})`;
+    return `${id}  score ${f2(a.score)}/${Object.keys(a.legend || {}).length - 1}${lvl ? ` "${clip(lvl, 60)}"` : ''} (conf ${f2(a.confidence)})${by}`;
   }
   return `${id}  ${JSON.stringify(a)}`;
 }
@@ -676,11 +747,37 @@ async function cmdAsk({ pos, flags }) {
   }
   body.model ||= modelName(flags);
   if (!body.state || !body.questions) die('spec needs "state" and "questions"');
-  const res = await http('POST', '/v1/systemone', body);
-  const lines = Object.entries(res.answers).map(([id, a]) => fmtAnswer(id, a));
+  const states = chunkState(body.state);
+  const replies = await pool(states.map((s) => () => http('POST', '/v1/systemone', { ...body, state: s.state })), num(flags.concurrency, 16));
+  const answers = Object.fromEntries(Object.keys(body.questions).map((id) => [id, mergeChunks(replies.map((res, i) => ({ answer: res.answers[id], from: states[i].from, to: states[i].to })))]));
+  const usage = { input_tokens: replies.reduce((a, res) => a + (res.usage?.input_tokens || 0), 0) };
+  const lines = Object.entries(answers).map(([id, a]) => fmtAnswer(id, a));
   const stateText = typeof body.state === 'string' ? body.state : JSON.stringify(body.state);
-  const foot = footer(t0, [{ text: stateText }], [], { requests: 1, jevTokens: res.usage?.input_tokens || 0, cost: costOf(res.usage) }, lines.join('\n'), []);
-  emit(flags, res, lines, foot.replace('1 scanned · ', ''));
+  const stats = { requests: states.length, jevTokens: usage.input_tokens, cost: replies.reduce((a, res) => a + costOf(res.usage), 0) };
+  const foot = footer(t0, [{ text: stateText }], states.length > 1 ? [`${states.length} chunks`] : [], stats, lines.join('\n'), []);
+  emit(flags, { answers, usage, model: replies[0].model, chunks: states.length }, lines, foot.replace('1 scanned · ', ''));
+}
+
+// The ask state as the list of states to send, each fitting one chunk. A string is chunked like any item. A JSON
+// object or array larger than a chunk is split into groups of whole top-level entries; one entry larger than a
+// chunk cannot be split without breaking the field references in the questions, so that is an error.
+function chunkState(state) {
+  if (typeof state === 'string') return chunkText(state).map((c) => ({ state: c.text, from: c.from, to: c.to }));
+  const size = (v) => JSON.stringify(v).length;
+  if (size(state) <= CHUNK_CHARS) return [{ state }];
+  const isArr = Array.isArray(state);
+  if (state === null || typeof state !== 'object') die(`the ask state is larger than one chunk (--chunk-chars ${CHUNK_CHARS})`);
+  const groups = [];
+  let cur = [], len = 2;
+  for (const [i, e] of (isArr ? state : Object.entries(state)).entries()) {
+    const n = isArr ? size(e) : size(e[0]) + 1 + size(e[1]);
+    if (n + 2 > CHUNK_CHARS) die(`the ask state's ${isArr ? `element ${i}` : `field "${e[0]}"`} is ${n} chars, larger than one chunk (--chunk-chars ${CHUNK_CHARS}); pass the document as a string state, or split it`);
+    if (cur.length && len + n + 1 > CHUNK_CHARS) { groups.push(cur); cur = []; len = 2; }
+    cur.push(e);
+    len += n + 1;
+  }
+  groups.push(cur);
+  return groups.map((g) => ({ state: isArr ? g : Object.fromEntries(g) }));
 }
 
 async function promptHidden(q) {
@@ -774,10 +871,19 @@ INPUTS  files, directories (.gitignore respected), globs (Node 22+), - (stdin),
         --max-bytes N a larger file is skipped and a larger stdin or --items
         file is refused.
 
+CHUNKS  Nothing is truncated. An item longer than --chunk-chars is split at
+        line ends into overlapping chunks (500 chars), each judged on its own;
+        the highest-scoring chunk decides the item: filter and ask yes/no take
+        the highest probability, rank and ask --score the highest score,
+        classify and ask --choice the most confident chunk's label. Output
+        shows "(N chunks, best lines A-B)". Because any one chunk can make an
+        item pass, ask positive questions ("does it contain X?"), not "does it
+        lack X?".
+
 OPTIONS
  input    --lines             each non-empty line is an item (logs, lists)
           --ext ts,tsx        only these file extensions
-          --max-chars 60000   truncate each item (marked ~ in the output)
+          --chunk-chars 60000 chunk size, 1000-90000 (fits Jev's 32k context)
           --limit 5000        refuse to run on more items than this
           --max-bytes N       per-file/stdin/--items size cap (opt-in; at
                               most 104857600, the 100 MB hard cap)
@@ -815,6 +921,7 @@ ENVIRONMENT
   QUICKSILVER_HOME      config + stats directory (default ~/.quicksilver)
   QUICKSILVER_FOLLOW_SYMLINKS=1  same as --follow-symlinks
   QUICKSILVER_MAX_BYTES  same as --max-bytes (the flag wins)
+  QUICKSILVER_CHUNK_CHARS  same as --chunk-chars (the flag wins)
 
 EXIT CODES  0 ok · 1 usage/input error · 3 key missing, rejected or out of
             credits (re-run setup) · 4 request rejected · 5 request failed
@@ -840,7 +947,10 @@ USE CASES
 
 // Every command validates its numeric flags and resolves the provider first, from its parsed flags.
 const COMMANDS = Object.fromEntries(Object.entries({ setup: cmdSetup, status: cmdStatus, filter: cmdFilter, classify: cmdClassify, rank: cmdRank, find: cmdFind, ask: cmdAsk })
-  .map(([name, fn]) => [name, (args) => { checkNums(args.flags); MAX_BYTES = resolveMaxBytes(args.flags); resolveProvider(args.flags); return fn(args); }]));
+  .map(([name, fn]) => [name, (args) => { checkNums(args.flags);
+    MAX_BYTES = flagOrEnv(args.flags, 'max-bytes', 'QUICKSILVER_MAX_BYTES', HARD_MAX_BYTES);
+    CHUNK_CHARS = flagOrEnv(args.flags, 'chunk-chars', 'QUICKSILVER_CHUNK_CHARS', CHUNK_CHARS);
+    resolveProvider(args.flags); return fn(args); }]));
 
 process.on('unhandledRejection', (e) => die(`unexpected error: ${e?.stack || e}`, 5));
 process.on('uncaughtException', (e) => die(`unexpected error: ${e?.stack || e}`, 5));

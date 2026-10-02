@@ -87,8 +87,9 @@ shortlist, and check the `?` items yourself.
 globs, `-` for stdin, or `--items FILE.jsonl` (one JSON object per line with
 `id` and `text`, or plain text lines; `-` reads stdin). Add `--lines` to judge
 each line separately (logs, CSVs, lists). Use `--ext ts,tsx` to limit file types.
-Items longer than `--max-chars 60000` are truncated; more than `--limit 5000`
-items is refused. Any input size is read up to a 100 MB hard cap; `--max-bytes N`
+Nothing is truncated: an item longer than `--chunk-chars 60000` is split into
+overlapping chunks, and the highest-scoring chunk decides it (see "Reading the
+output"). More than `--limit 5000` items is refused. Any input size is read up to a 100 MB hard cap; `--max-bytes N`
 sets a lower cap (larger files skipped, larger stdin or `--items` refused). Symlinks are listed
 as skipped; add `--follow-symlinks` to read them (the target is still secret-checked).
 
@@ -142,8 +143,12 @@ bug 41 · feature 12 · question 7
 - `?` marks a borderline or low-confidence item. **Read those yourself.** In the
   benchmark, the false positives sat in this band. Treat everything else as a
   reliable shortlist.
-- `~` after an item means it was truncated past `--max-chars` (default 60k chars),
-  so Jev only saw the start.
+- `(3 chunks, best lines 41-80)` after an item means it was longer than
+  `--chunk-chars` (default 60k chars) and was judged in 3 parts; the
+  highest-scoring part decided the verdict (filter and rank: the highest
+  probability or score; classify: the most confident chunk's label), and those
+  lines are where to look. Since any one chunk can make an item pass, phrase
+  questions positively ("Does this file send email?", not "Does it lack X?").
 - The footer shows cost and the estimated Claude tokens avoided. Mention the
   savings to the user when they're meaningful.
 - Jev's verdicts make a **shortlist, not proof**. Open the survivors before you

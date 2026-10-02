@@ -188,7 +188,18 @@ qs status   --provider openrouter                                               
 
 The output is built for an LLM to read: one line per hit, repeated log patterns
 collapsed into line-number ranges, classify results as id lists, and a `?` on
-anything borderline. Every run ends with a receipt:
+anything borderline.
+
+Nothing is truncated. A file or item longer than `--chunk-chars` (60,000
+characters, sized for Jev's 32k-token context) is split at line ends into
+overlapping chunks that are judged separately, and the highest-scoring chunk
+decides the item: the highest yes-probability for `filter`, the highest score
+for `rank` and `ask --score`, the most confident label for `classify` and
+`ask --choice`. The output says `(3 chunks, best lines 41-80)`. Because one
+chunk is enough to make a file pass, phrase questions positively ("Does this
+file send email?"), not as "Does this file lack X?".
+
+Every run ends with a receipt:
 
 ```
 — 3000 scanned · 6 matched · 0 borderline · 64.2s · jev 1.0M tok ($0.0436) · ~56k Claude tokens not read

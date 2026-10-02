@@ -22,10 +22,20 @@ let server, port, BASE, TMP, QHOME;
 
 function mockAnswer(body) {
   const answers = {};
+  // Chunking tests mark their content CHUNKTEST: then a request whose state holds NEEDLE says yes (and label a),
+  // any other part of the same item says no (and label b), so the aggregation over chunks is observable.
+  const state = JSON.stringify(body.state ?? '');
+  const chunkTest = state.includes('CHUNKTEST');
+  const hit = state.includes('NEEDLE');
   for (const [k, q] of Object.entries(body.questions || {})) {
     // choice answers must name real criteria keys (find looks the chosen line number up)
     const [c0, c1] = q.criteria && !Array.isArray(q.criteria) ? Object.keys(q.criteria) : ['a', 'b'];
     answers[k] = { type: q.type, noul: 0.9, choice: c0, confidence: 0.9, probabilities: { [c0]: 0.9, [c1]: 0.1 }, score: 3 };
+    if (chunkTest) {
+      answers[k] = hit
+        ? { type: q.type, noul: 0.95, choice: c0, confidence: 0.9, probabilities: { [c0]: 0.9, [c1]: 0.1 }, score: 4 }
+        : { type: q.type, noul: 0.05, choice: c1, confidence: 0.8, probabilities: { [c0]: 0.2, [c1]: 0.8 }, score: 0 };
+    }
   }
   return { answers, usage: { input_tokens: 10 }, model: 'mock' };
 }
@@ -184,7 +194,7 @@ describe('M2: secret guard covers common credential files', () => {
 describe('M3: numeric flags are validated before any request', () => {
   const bad = [
     ['--concurrency', '0'], ['--concurrency', 'abc'], ['--concurrency', '2.5'], ['--limit', 'abc'], ['--limit', '0'],
-    ['--threshold', 'abc'], ['--threshold', '1.5'], ['--band', '-0.1'], ['--max-chars', '0'], ['--width', 'x'],
+    ['--threshold', 'abc'], ['--threshold', '1.5'], ['--band', '-0.1'], ['--chunk-chars', '0'], ['--width', 'x'],
     ['--pack-items', '0'], ['--pack-tokens', 'NaN'],
   ];
   for (const [flag, value] of bad) {
@@ -635,10 +645,12 @@ describe('--max-bytes: the per-input cap is configurable', () => {
     assert.equal(reqs.length, 0);
   });
 
-  test('without --max-bytes a stdin over the old 2 MB cap is read', async () => {
-    const r = await qs(['filter', 'q?', '-'], { input: 'x'.repeat(2 * 1024 * 1024 + 1) });
+  test('without --max-bytes a stdin over the old 2 MB cap is read, all of it', async () => {
+    const n = 2 * 1024 * 1024 + 1;
+    const r = await qs(['filter', 'q?', '-'], { input: 'x'.repeat(n) });
     assert.equal(r.code, 0, r.stderr);
-    assert.equal(reqs.length, 1);
+    // one line, so hard 60000-char chunks that each restart 500 chars back
+    assert.equal(reqs.length, Math.ceil((n - 500) / 59500));
   });
 
   test('a stdin over the 100 MB hard cap exits 1 without a request', async () => {
@@ -675,6 +687,135 @@ describe('--max-bytes: the per-input cap is configurable', () => {
     const b = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { QUICKSILVER_MAX_BYTES: 'lots' } });
     assert.equal(b.code, 1);
     assert.match(b.stderr, /QUICKSILVER_MAX_BYTES/);
+    assert.equal(reqs.length, 0);
+  });
+});
+
+describe('chunking: a long item is split, never truncated', () => {
+  // 100 numbered lines of 50 chars = 5000 chars; with --chunk-chars 2000 and the 500-char overlap that is 3 chunks.
+  const lines = (marker = '') => Array.from({ length: 100 }, (_, i) => `CHUNKTEST line ${String(i + 1).padStart(3, '0')} ${i === 49 ? marker.padEnd(26, '.') : '.'.repeat(26)}`);
+  const contents = () => reqs.map((r) => JSON.parse(r.body).state).map((s) => (typeof s === 'string' ? s : JSON.stringify(s))).join('\n');
+
+  test('filter: only the middle of 3 chunks matches, the item is found once, every line is sent', async () => {
+    const dir = mkdir({ 'big.txt': lines('NEEDLE').join('\n') });
+    const r = await qs(['filter', 'q?', 'big.txt', '--chunk-chars', '2000', '--json'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(reqs.length, 3);
+    const out = JSON.parse(r.stdout);
+    assert.deepEqual(out.matched.map((m) => [m.id, m.p, m.chunks]), [['big.txt', 0.95, 3]]);
+    for (const l of lines('NEEDLE')) assert.ok(contents().includes(l), `not sent: ${l}`);
+    for (const r2 of reqs) assert.ok(JSON.parse(r2.body).state.content.length <= 2000);
+  });
+
+  test('filter text output names the chunk count and the best line range', async () => {
+    const dir = mkdir({ 'big.txt': lines('NEEDLE').join('\n') });
+    const r = await qs(['filter', 'q?', 'big.txt', '--chunk-chars', '2000'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^0\.95 {2}big\.txt \(3 chunks, best lines \d+-\d+\)$/m);
+  });
+
+  test('a 70k-char item is sent whole in 2 chunks at the default chunk size', async () => {
+    const text = Array.from({ length: 1400 }, (_, i) => `row ${i} ${'y'.repeat(45)}`).join('\n');
+    const dir = mkdir({ 'a.txt': text });
+    const r = await qs(['filter', 'q?', 'a.txt', '--json'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(reqs.length, 2);
+    assert.ok(contents().includes('row 0 ') && contents().includes('row 1399 '));
+    assert.equal(JSON.parse(r.stdout).matched[0].chunks, 2);
+  });
+
+  // 60 lines (2 chunks at --chunk-chars 2000); NEEDLE, when given, only in line 2, i.e. only in the first chunk.
+  const sixty = (needle) => Array.from({ length: 60 }, (_, i) => `CHUNKTEST line ${String(i + 1).padStart(3, '0')} ${i === 1 && needle ? 'NEEDLE'.padEnd(26, '.') : '.'.repeat(26)}`).join('\n');
+
+  test('classify: the most confident chunk decides the label, and its line range is reported', async () => {
+    // second chunk: second-to-last line, so the deciding chunk is the later one
+    const text = sixty(false).split('\n').map((l, i) => (i === 58 ? l.replace('.'.repeat(6), 'NEEDLE') : l)).join('\n');
+    const dir = mkdir({ 'a.txt': text });
+    const r = await qs(['classify', '--labels', 'a,b', 'a.txt', '--chunk-chars', '2000', '--json'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(reqs.length, 2);
+    const [row] = JSON.parse(r.stdout);
+    // chunk 1 says b at 0.8, chunk 2 (with NEEDLE) says a at 0.9: the more confident chunk wins, no averaging
+    assert.deepEqual([row.label, row.confidence, row.probabilities, row.chunks], ['a', 0.9, { a: 0.9, b: 0.1 }, 2]);
+    assert.ok(row.best_lines[0] > 1 && row.best_lines[1] === 60, String(row.best_lines));
+  });
+
+  test('classify: equally confident chunks go to the earliest one', async () => {
+    const dir = mkdir({ 'a.txt': sixty(false) });
+    const r = await qs(['classify', '--labels', 'a,b', 'a.txt', '--chunk-chars', '2000', '--json'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    const [row] = JSON.parse(r.stdout);
+    assert.equal(row.label, 'b');
+    assert.equal(row.best_lines[0], 1);
+  });
+
+  test('ask --score: the highest-scoring chunk decides', async () => {
+    const dir = mkdir({ 'doc.txt': sixty(true) });
+    const r = await qs(['ask', 'q?', '--state', '@doc.txt', '--score', 'low|mid|high|max|top', '--chunk-chars', '2000', '--json'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.answers.answer.score, 4);
+    assert.equal(out.answers.answer.best_lines[0], 1);
+  });
+
+  test('rank: relevance is the max over chunks', async () => {
+    const dir = mkdir({ 'big.txt': lines('NEEDLE').join('\n') });
+    const r = await qs(['rank', 'q', 'big.txt', '--chunk-chars', '2000', '--json'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout).map((x) => [x.id, x.relevance, x.chunks]), [['big.txt', 1, 3]]);
+  });
+
+  test('ask --state over a long document is chunked; noul is the max over chunks', async () => {
+    const dir = mkdir({ 'doc.txt': lines('NEEDLE').join('\n') });
+    const r = await qs(['ask', 'q?', '--state', '@doc.txt', '--chunk-chars', '2000', '--json'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(reqs.length, 3);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.answers.answer.noul, 0.95);
+    assert.equal(out.chunks, 3);
+  });
+
+  test('ask spec with a large array state is split into groups of whole elements', async () => {
+    const state = Array.from({ length: 3 }, (_, i) => `CHUNKTEST element ${i} ${'z'.repeat(800)}`);
+    const dir = mkdir({ 'spec.json': JSON.stringify({ state, questions: { q: { type: 'noul', instructions: 'q?' } } }) });
+    const r = await qs(['ask', 'spec.json', '--chunk-chars', '2000', '--json'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(reqs.length, 2);
+    assert.ok(reqs.every((q) => Array.isArray(JSON.parse(q.body).state)));
+    assert.equal(JSON.parse(r.stdout).chunks, 2);
+  });
+
+  test('ask spec whose single JSON field is larger than a chunk exits 1', async () => {
+    const dir = mkdir({ 'spec.json': JSON.stringify({ state: { doc: 'w'.repeat(3000) }, questions: { q: { type: 'noul', instructions: 'q?' } } }) });
+    const r = await qs(['ask', 'spec.json', '--chunk-chars', '2000'], { cwd: dir });
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /chunk/);
+    assert.equal(reqs.length, 0);
+  });
+
+  test('find: a line longer than a chunk is split, and no request exceeds the chunk size', async () => {
+    const dir = mkdir({ 'm.js': `short line\n${'q'.repeat(5000)}\nlast line` });
+    const r = await qs(['find', 'q', 'm.js', '--chunk-chars', '2000'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    let sentQ = 0;
+    for (const q of reqs) {
+      const ls = Object.values(JSON.parse(q.body).state.lines);
+      assert.ok(ls.join('').length <= 2000);
+      sentQ += ls.join('').split('q').length - 1;
+    }
+    assert.ok(sentQ >= 5000, `only ${sentQ} of 5000 chars sent`);
+  });
+
+  test('--chunk-chars outside 1000..90000 and a bad QUICKSILVER_CHUNK_CHARS exit 1', async () => {
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    for (const v of ['999', '90001']) {
+      const r = await qs(['filter', 'q?', 'a.txt', '--chunk-chars', v], { cwd: dir });
+      assert.equal(r.code, 1, r.stderr);
+      assert.match(r.stderr, /--chunk-chars/);
+    }
+    const b = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { QUICKSILVER_CHUNK_CHARS: '100' } });
+    assert.equal(b.code, 1);
+    assert.match(b.stderr, /QUICKSILVER_CHUNK_CHARS/);
     assert.equal(reqs.length, 0);
   });
 });
