@@ -739,6 +739,14 @@ describe('--max-bytes: the per-input cap is configurable', () => {
     assert.equal(reqs.length, 1);
   });
 
+  test('when every input is skipped, the error lists what was skipped and why', async () => {
+    const dir = mkdir({ 'big.js': 'x'.repeat(5000) });
+    const r = await qs(['filter', 'q?', 'big.js', '--max-bytes', '1000'], { cwd: dir });
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /nothing to filter: 1 input skipped \(big\.js \(binary or over 1000 bytes\)\)/);
+    assert.equal(reqs.length, 0);
+  });
+
   test('invalid --max-bytes and QUICKSILVER_MAX_BYTES exit 1 naming them', async () => {
     const dir = mkdir({ 'a.txt': 'hello-a' });
     const a = await qs(['filter', 'q?', 'a.txt', '--max-bytes', '0'], { cwd: dir });

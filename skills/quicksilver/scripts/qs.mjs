@@ -828,8 +828,11 @@ function label(r, flags) {
   return flags.lines || flags.items ? `${it.id}${chunkNote(r)}  ${clip(it.text.trim().replace(/\s+/g, ' '), num(flags.width, 160))}` : `${it.id}${chunkNote(r)}`;
 }
 
-function requireInputs(items, cmd) {
-  if (!items.length) die(`nothing to ${cmd}: pass files, directories, globs, --items FILE, or - for stdin`);
+// When every input was skipped, say which and why (the same list the footer prints), not just "pass files".
+function requireInputs(items, cmd, skipped) {
+  if (items.length) return;
+  if (skipped.length) die(`nothing to ${cmd}: ${skipped.length} input${skipped.length > 1 ? 's' : ''} skipped (${clip(skipped.join(', '), 400)})`);
+  die(`nothing to ${cmd}: pass files, directories, globs, --items FILE, or - for stdin`);
 }
 
 // ---------- commands ----------
@@ -877,7 +880,7 @@ async function cmdFilter({ pos, flags }) {
   if (!question) die('usage: filter "<yes/no question>" <paths...>');
   const t0 = Date.now();
   const { items, skipped } = collect(pos, flags);
-  requireInputs(items, 'filter');
+  requireInputs(items, 'filter', skipped);
   const thr = num(flags.threshold, 0.5), band = num(flags.band, 0.15);
   const rows = await runPerItem(items, flags, (ref, packed) => ({
     type: 'noul',
@@ -917,7 +920,7 @@ async function cmdClassify({ pos, flags }) {
   const question = flags.question || 'Which label best describes this item?';
   const t0 = Date.now();
   const { items, skipped } = collect(pos, flags);
-  requireInputs(items, 'classify');
+  requireInputs(items, 'classify', skipped);
   const minConf = num(flags['min-confidence'], 0.6);
   const rows = await runPerItem(items, flags, (ref, packed) => ({
     type: 'choice',
@@ -970,7 +973,7 @@ async function cmdRank({ pos, flags }) {
   if (!query) die('usage: rank "<query>" <paths...> [--top 10]');
   const t0 = Date.now();
   const { items, skipped } = collect(pos, flags);
-  requireInputs(items, 'rank');
+  requireInputs(items, 'rank', skipped);
   const rows = await runPerItem(items, flags, (ref, packed) => ({
     type: 'score',
     instructions: { query, question: `How relevant is ${ref} to \`query\`?${packed ? ' Ignore the other items.' : ''}` },
@@ -990,7 +993,7 @@ async function cmdFind({ pos, flags }) {
   const t0 = Date.now();
   const chunkLines = Math.min(num(flags.chunk, 150), 250);
   const { items: files, skipped } = collect(pos, { ...flags, lines: false });
-  requireInputs(files, 'find');
+  requireInputs(files, 'find', skipped);
   const chunks = [];
   for (const f of files) {
     // Every non-blank line is sent whole (it used to be clipped to 400 chars). A line longer than a chunk is
