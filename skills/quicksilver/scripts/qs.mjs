@@ -525,7 +525,10 @@ async function cmdClassify({ pos, flags }) {
     criteria,
   }));
   const groups = {};
-  for (const r of rows) (groups[r.answer.choice] ||= []).push(r);
+  for (const r of rows) {
+    groups[r.answer.choice] ??= [];
+    groups[r.answer.choice].push(r);
+  }
   const only = flags.only ? new Set(String(flags.only).split(',')) : null;
   const low = rows.filter((r) => r.answer.confidence < minConf);
   const lines = [Object.keys(criteria).map((k) => `${k} ${groups[k]?.length || 0}`).join(' · ')];
