@@ -206,16 +206,28 @@ a vibe.
 
 ## Safety
 
-- It never sends `.env*`, private keys, certificates, or credentials files. It
-  respects `.gitignore`, and skips binaries and files over 2 MB.
+- It never sends secret-like files: `.env*`, `.envrc`, private keys and
+  certificates (`*.pem`, `*.key`, `id_rsa`, `*.p8`, `*.ppk`, ...), credentials
+  files (`.npmrc`, `.netrc`, `.git-credentials`, `.pgpass`, `.htpasswd`,
+  `.dockercfg`, `.docker/config.json`, `kubeconfig`, `service-account*.json`),
+  Terraform vars and state, KeePass vaults, VPN profiles and `*.gpg` files.
+  The guard also covers files you name explicitly (`--items`, `--state @file`,
+  an `ask` spec, `--labels-json @file`); `--no-secrets-guard` turns it off.
+- Symlinks are never followed by default: they are listed as skipped, so a link
+  inside a repo can't pull in a file from elsewhere. `--follow-symlinks` (or
+  `QUICKSILVER_FOLLOW_SYMLINKS=1`) reads them; the secret guard then also checks
+  the link's target.
+- It respects `.gitignore`, skips binaries and files over 2 MB, and refuses
+  stdin or an `--items` file over 2 MB.
 - Content goes to TypeSafe's API (`api.typesafe.ai`), or through openrouter.ai
   with the openrouter provider, which is chosen automatically whenever
   `OPENROUTER_API_KEY` is set; OpenRouter's own data, logging and billing
   policies then apply. TypeSafe states that Jev is not trained on customer
   data. Don't point it at anything you can't send to a third party.
 - The key is stored in `~/.quicksilver/config.json` (or `$QUICKSILVER_HOME`)
-  with user-only permissions. `npx github:Emasoft/quicksilver setup --remove`
-  deletes it.
+  with user-only permissions, one key per provider. An exported key needs no
+  file at all. `npx github:Emasoft/quicksilver setup --remove` deletes the
+  active provider's saved key.
 
 ## FAQ
 

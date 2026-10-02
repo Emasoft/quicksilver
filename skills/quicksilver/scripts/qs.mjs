@@ -744,13 +744,17 @@ COMMANDS
   find "<what>" <files>                 locate the matching lines in big files
   ask "<question>" --state @f|text|-    one judgment over one document
   ask spec.json|-                       raw {state, questions} request
-  setup [KEY] [--remove]                verify + save a key (prompts if none)
+  setup [KEY] [--remove]                verify + save a key, one per provider
+                                        (prompts if none; prefer an env var)
   status                                check the key, show lifetime savings
   help, --help, -h                      this screen
 
 INPUTS  files, directories (.gitignore respected), globs (Node 22+), - (stdin),
         --items FILE.jsonl|- (one {"id","text"} object or plain line each).
-        .env*, keys, certs, credentials never sent; binary or >2 MB skipped.
+        Secret-like files (.env*, .envrc, keys, certs, credentials, kubeconfig,
+        terraform vars/state, ...) are never sent, even when named explicitly.
+        Symlinks are skipped unless --follow-symlinks. Binary or >2 MB files
+        are skipped; stdin or an --items file over 2 MB is refused.
 
 OPTIONS
  input    --lines             each non-empty line is an item (logs, lists)

@@ -74,7 +74,9 @@ shortlist, and check the `?` items yourself.
 - Arithmetic, counting, date or time comparison. Do those in code.
 - Anything generative (writing, summarizing, editing) or needing a chain of reasoning.
 - Content the user wouldn't want sent to a third-party API. Quicksilver already
-  skips `.env*`, keys, certs, and credentials files, and respects `.gitignore`.
+  skips secret-like files (`.env*`, `.envrc`, keys, certs, credentials files,
+  kubeconfig, Terraform vars/state, ...) even when named explicitly, never
+  follows symlinks unless `--follow-symlinks` is given, and respects `.gitignore`.
 
 ## Commands
 
@@ -86,7 +88,8 @@ globs, `-` for stdin, or `--items FILE.jsonl` (one JSON object per line with
 `id` and `text`, or plain text lines; `-` reads stdin). Add `--lines` to judge
 each line separately (logs, CSVs, lists). Use `--ext ts,tsx` to limit file types.
 Items longer than `--max-chars 60000` are truncated; more than `--limit 5000`
-items is refused.
+items is refused, as is stdin or an `--items` file over 2 MB. Symlinks are listed
+as skipped; add `--follow-symlinks` to read them (the target is still secret-checked).
 
 ```bash
 qs filter "<yes/no question>" <inputs> [--threshold 0.5] [--band 0.15] [--lines]
