@@ -2,7 +2,7 @@
 # Quicksilver dev installer for the Emasoft fork: clone (or fast-forward) the fork, then copy the
 # skill into ~/.claude/skills/quicksilver via bin/quicksilver.mjs install.
 #   curl -fsSL https://raw.githubusercontent.com/Emasoft/quicksilver/main/install-dev.sh | sh
-#   ... | sh -s -- --provider openrouter    (args go to `quicksilver install`, e.g. --key KEY)
+#   ... | sh -s -- --provider typesafe    (args go to `quicksilver install`; an exported key is detected)
 # QUICKSILVER_DEV_DIR overrides the clone location (default ~/.local/share/quicksilver).
 # --dry-run prints what it would do. An existing clone is never reset or deleted: a foreign repo or
 # local changes stop the script, so a dev checkout cannot lose work.

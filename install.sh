@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Installs Quicksilver as a personal Claude Code skill, then asks for your Jev key once.
+# Installs Quicksilver as a personal Claude Code skill, then detects an exported key (or asks for one once).
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 DEST="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/quicksilver"

@@ -20,22 +20,23 @@ node "<base directory of this skill>/scripts/qs.mjs"
 
 Needs Node 18+ (globs need Node 22+). There are no other dependencies.
 
-## First run: set the key once
+## First run: the key
 
 Run `qs status` first.
 
 - `ready` means go straight to the task.
-- `not configured` means ask the user for their Jev API key, and point them to
-  **https://console.typesafe.ai** to create one. They can:
-  1. paste it in chat. Then run `qs setup <KEY>` (it verifies the key, then
-     saves it to `~/.quicksilver/config.json`, user-only permissions), **or**
-  2. keep it out of the chat by running `node "<skill dir>/scripts/qs.mjs" setup`
-     in their own terminal. It prompts for the key with hidden input.
+- `not configured` means no key was found. Never ask the user to paste a key into
+  the chat. The preferred fix: the user exports it in their shell profile, where
+  Quicksilver detects it, then restarts Claude Code so the session inherits it:
+  `JEV_API_KEY` (or `TYPESAFE_API_KEY`) with a key from **https://console.typesafe.ai**,
+  or `OPENROUTER_API_KEY` with a key from **https://openrouter.ai/settings/keys**.
+  Fallback without an env var: the user runs `node "<skill dir>/scripts/qs.mjs" setup`
+  in their own terminal (add `--provider openrouter` for an OpenRouter key). It prompts
+  with hidden input, verifies the key and saves it to `~/.quicksilver/config.json`
+  (user-only permissions).
 
-  Env keys (`JEV_API_KEY`/`TYPESAFE_API_KEY` for typesafe, `OPENROUTER_API_KEY` for openrouter) also work and take precedence over the saved key of the same provider. The provider is chosen by `--provider`, then `QUICKSILVER_PROVIDER`, then automatically openrouter whenever `OPENROUTER_API_KEY` is set, then the one saved by setup, then typesafe.
-  An OpenRouter key works too: `qs setup <KEY> --provider openrouter` (key from
-  https://openrouter.ai/settings/keys), or `OPENROUTER_API_KEY` in the environment.
-  After setup, carry on with the original task. Don't stop at "configured".
+  Env keys take precedence over the saved key of the same provider. The provider is chosen by `--provider`, then `QUICKSILVER_PROVIDER`, then automatically openrouter whenever `OPENROUTER_API_KEY` is set, then the one saved by setup, then typesafe.
+  Once a key is in place, carry on with the original task. Don't stop at "configured".
 
 Exit code 3 means a key problem: missing, rejected, or out of credits. Re-run setup.
 Exit code 4 means Jev rejected the request (fix the question or labels); 5 means

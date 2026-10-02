@@ -31,19 +31,29 @@ you ─▶ Claude ──"which files handle auth?"──▶ quicksilver ──�
 
 ## Install
 
+Export your key in your shell profile (`~/.zshrc`, `~/.bashrc`, ...), if it isn't
+there already. Quicksilver detects it, so no key ever goes into a command:
+`JEV_API_KEY` (or `TYPESAFE_API_KEY`) with a key from [console.typesafe.ai](https://console.typesafe.ai),
+or `OPENROUTER_API_KEY` with a key from [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys).
+Then run:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Emasoft/quicksilver/main/install-dev.sh | sh
 ```
 
 The script clones this fork into `~/.local/share/quicksilver` (or fast-forwards
 an existing clone there), copies the skill into `~/.claude/skills/quicksilver`,
-and asks for your Jev key **once**. Get a key at [console.typesafe.ai](https://console.typesafe.ai).
+and reports which exported key and provider it will use. If `OPENROUTER_API_KEY`
+is set, Quicksilver uses OpenRouter automatically, even over a TypeSafe key; pass
+`--provider typesafe` (or set `QUICKSILVER_PROVIDER=typesafe`) to keep TypeSafe.
+With no exported key, it asks for one once, with hidden input, and saves it to
+`~/.quicksilver/config.json`.
 Then restart Claude Code. That's it. Claude uses the skill on its own whenever
 a task looks like "read a lot to decide a little". Needs git and Node 18+.
 
 ```bash
-# use an OpenRouter key instead of a Jev key (arguments after -- go to the installer)
-curl -fsSL https://raw.githubusercontent.com/Emasoft/quicksilver/main/install-dev.sh | sh -s -- --provider openrouter
+# pick the provider when both keys are exported (arguments after -- go to the installer)
+curl -fsSL https://raw.githubusercontent.com/Emasoft/quicksilver/main/install-dev.sh | sh -s -- --provider typesafe
 
 # keep the clone somewhere else, or only print what the script would do
 curl -fsSL https://raw.githubusercontent.com/Emasoft/quicksilver/main/install-dev.sh | QUICKSILVER_DEV_DIR=~/src/quicksilver sh
@@ -62,12 +72,14 @@ uncommitted edits, run `node ~/.local/share/quicksilver/bin/quicksilver.mjs inst
 <summary>Other ways to install</summary>
 
 ```bash
-# npx: install, or pass the key non-interactively (CI, dotfiles)
+# npx (detects an exported key the same way)
 npx github:Emasoft/quicksilver
-npx github:Emasoft/quicksilver install --key YOUR_JEV_KEY
 
-# use an OpenRouter key instead
-npx github:Emasoft/quicksilver setup YOUR_OPENROUTER_KEY --provider openrouter
+# no exported key: save one with a hidden prompt (add --provider openrouter for an OpenRouter key)
+npx github:Emasoft/quicksilver setup
+
+# non-interactive fallback; in CI prefer exporting the env var in the job instead
+npx github:Emasoft/quicksilver install --key YOUR_JEV_KEY
 
 # as a Claude Code plugin
 /plugin marketplace add Emasoft/quicksilver
@@ -77,7 +89,7 @@ npx github:Emasoft/quicksilver setup YOUR_OPENROUTER_KEY --provider openrouter
 git clone https://github.com/Emasoft/quicksilver && cd quicksilver && ./install.sh   # or .\install.ps1
 ```
 
-`JEV_API_KEY`, `TYPESAFE_API_KEY` or `OPENROUTER_API_KEY` in your environment also works. If `OPENROUTER_API_KEY` is set, Quicksilver uses OpenRouter automatically, even over a saved TypeSafe key; pass `--provider typesafe` (or set `QUICKSILVER_PROVIDER=typesafe`) to keep TypeSafe. Needs Node 18+.
+An exported key always beats a saved key of the same provider. Needs Node 18+.
 No npm dependencies.
 </details>
 
