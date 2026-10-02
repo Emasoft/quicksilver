@@ -1188,6 +1188,16 @@ describe('fallback: a failing provider hands the request to the next one', () =>
     assert.deepEqual(auths(), ['Bearer k2', `Bearer ${KEY}`, `Bearer ${KEY}`, `Bearer ${KEY}`]);
   });
 
+  test('a rejected literal key points at providers.json, not at setup', async () => {
+    writeProviders([mock2({ api_key: 'k2-literal' }), { name: 'typesafe', base_url: BASE }]);
+    failFor['Bearer k2-literal'] = [401];
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(logLines()[0], / hint="Fix api_key for mock2 in .*providers\.json"$/);
+    assert.doesNotMatch(fs.readFileSync(LOG(), 'utf8'), /k2-literal/);
+  });
+
   test('circuit breaker: 10 parallel items and a rejected first provider make exactly 1 request to it', async () => {
     chain();
     failFor['Bearer k2'] = [401];

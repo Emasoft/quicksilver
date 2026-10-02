@@ -556,7 +556,13 @@ async function callProvider(p, model, state, questions, { retries = 5 } = {}) {
     if (res.ok) return decodeReply(p, adapter, text, questions);
     // exit 3 = account/key problem the user must fix (SKILL.md contract)
     if (s === 402 || /insufficient (credits|balance|funds)/i.test(text)) throw fail('no-credits', s, outOfCredits(p, s), 3);
-    if (s === 401 || s === 403) throw fail('key-rejected', s, `${p.name} rejected the API key (${s})`, 3, `${p.key_url ? `Get a new one at ${p.key_url}, then run` : 'Run'}: node qs.mjs setup --provider ${p.name}`);
+    if (s === 401 || s === 403) {
+      // A key written literally in providers.json is fixed there; setup only fits a key the user has not placed by
+      // hand (and would silently replace the one in the file).
+      const hint = p.keySource === 'literal in providers.json' ? `Fix api_key for ${p.name} in ${PROVIDERS_FILE}`
+        : `${p.key_url ? `Get a new one at ${p.key_url}, then run` : 'Run'}: node qs.mjs setup --provider ${p.name}`;
+      throw fail('key-rejected', s, `${p.name} rejected the API key (${s})`, 3, hint);
+    }
     // ponytail: providers word "no such model" differently; a 400/422 naming the model as not found or
     // unavailable is read as model-unavailable (falls back) rather than a bad request. Extend the words as seen.
     if (s === 404 || ((s === 400 || s === 422) && /model/i.test(text) && /not found|not available|unavailable|unknown|not supported|not a valid|no endpoints|does not exist/i.test(text))) {
