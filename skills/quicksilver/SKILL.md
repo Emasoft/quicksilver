@@ -112,12 +112,12 @@ as skipped; add `--follow-symlinks` to read them (the target is still secret-che
 
 ```bash
 qs filter "<yes/no question>" <inputs> [--threshold 0.5] [--band 0.15] [--lines]
-qs classify --labels "a,b,c" <inputs> [--question "..."] [--only a] [--min-confidence 0.6] [--verbose]
+qs classify --labels "a,b,c" <inputs> [--question "..."] [--only a] [--min-confidence 0.6] [--verbose] [--default c]
 qs classify --labels "bug:Something is broken,feature:A request for new behaviour" <inputs>
 qs classify --labels-json '{"bug":"Something is broken"}' <inputs>   # or --labels-json @labels.json
 qs rank "<query>" <inputs> [--top 10 | --all]
 qs find "<what you're looking for>" <files> [--top 5] [--min-score 0.05] [--chunk 150]
-qs ask "<question>" --state @file|"text"|- [--choice "a,b,c" | --score "low|mid|high"]
+qs ask "<question>" --state @file|"text"|- [--choice "a,b,c" [--default c] | --score "low|mid|high"]
 qs ask spec.json        # {"state": ..., "questions": {"id": {"type": "noul|choice|score", ...}}}
 qs status               # the provider chain and each provider's state, plus lifetime tokens saved
 ```
@@ -163,8 +163,11 @@ bug 41 · feature 12 · question 7
 - `(3 chunks, best lines 41-80)` after an item means it was longer than
   `--chunk-chars` (default 60k chars) and was judged in 3 parts; the
   highest-scoring part decided the verdict (filter and rank: the highest
-  probability or score; classify: the most confident chunk's label), and those
-  lines are where to look. Since any one chunk can make an item pass, phrase
+  probability or score), and those lines are where to look. classify and
+  ask --choice: put the catch-all label LAST (or name it with `--default`); a
+  chunk that picks the catch-all does not vote, the most confident other chunk
+  decides, and the item gets the catch-all only if no chunk picked anything
+  else. Since any one chunk can make an item pass, phrase
   questions positively ("Does this file send email?", not "Does it lack X?").
 - The footer shows cost and the estimated Claude tokens avoided. Mention the
   savings to the user when they're meaningful.

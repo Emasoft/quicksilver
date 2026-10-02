@@ -794,19 +794,34 @@ function chunkText(text) {
 
 // User decision: the highest-scoring chunk decides a per-item judgement, never an average ("it should consider
 // the higest scored chunk to decide if the file passes or not or to give a rating"): yes/no by the highest
-// probability, a score by the highest score, a label by the most confident chunk. Ties go to the earliest chunk
-// (strict >). The deciding chunk is reported as best_chunk and, for text, best_lines.
-function mergeChunks(parts) {
+// probability, a score by the highest score. Ties go to the earliest chunk (strict >). The deciding chunk is
+// reported as best_chunk and, for text, best_lines.
+// A label (choice) follows the user's rule "Best real evidence wins": a plain max let the catch-all label win
+// whenever most chunks are unremarkable (four chunks of "other" at 0.99 hid one chunk of "cli" at 0.9). So a
+// chunk whose top label is the default (dflt) does not vote; among the voting chunks the most confident wins; if
+// none votes, the default wins at its best confidence. Without dflt every chunk votes.
+function mergeChunks(parts, dflt) {
   if (parts.length === 1) return parts[0].answer;
   const key = { noul: 'noul', score: 'score' }[parts[0].answer.type] ?? 'confidence';
   const val = (p) => p.answer[key] ?? -Infinity; // a null confidence never beats a real one
-  const best = parts.reduce((x, y) => (val(y) > val(x) ? y : x));
+  const votes = parts.filter((p) => p.answer.type !== 'choice' || p.answer.choice !== dflt);
+  const best = (votes.length ? votes : parts).reduce((x, y) => (val(y) > val(x) ? y : x));
   return { ...best.answer, best_chunk: parts.indexOf(best) + 1, ...(best.from ? { best_lines: [best.from, best.to] } : {}) };
 }
 
+// The default (catch-all) label of a choice: --default when given, which must be one of the labels, else the last
+// label. It decides which chunks vote in mergeChunks.
+function defaultLabel(criteria, flags) {
+  const keys = Array.isArray(criteria) ? criteria.map(String) : Object.keys(criteria ?? {});
+  if (flags.default === undefined) return keys.at(-1);
+  if (!keys.includes(String(flags.default))) die(`--default must be one of the labels: ${keys.join(', ')}`);
+  return String(flags.default);
+}
+
 // Run one question per item, or per chunk of a long item, then merge the chunk answers back into one row per
-// item. makeQ(ref, packed) builds the question; ref is how the unit is addressed in state.
-async function runPerItem(items, flags, makeQ) {
+// item. makeQ(ref, packed) builds the question; ref is how the unit is addressed in state; dflt is the default
+// label of a choice (see mergeChunks).
+async function runPerItem(items, flags, makeQ, dflt) {
   const units = items.flatMap((item) => {
     const cs = chunkText(item.text);
     item.chunks = cs.length;
@@ -827,7 +842,7 @@ async function runPerItem(items, flags, makeQ) {
     if (!parts.has(u.item)) parts.set(u.item, []);
     parts.get(u.item).push({ answer, from: u.from, to: u.to });
   }
-  return [...parts].map(([item, ps]) => ({ item, answer: mergeChunks(ps) }));
+  return [...parts].map(([item, ps]) => ({ item, answer: mergeChunks(ps, dflt) }));
 }
 
 // ---------- output ----------
@@ -953,6 +968,7 @@ async function cmdClassify({ pos, flags }) {
   const criteria = parseLabels(flags);
   const n = Object.keys(criteria).length;
   if (n < 2 || n > 255) die('classify needs 2–255 labels');
+  const dflt = defaultLabel(criteria, flags);
   const question = flags.question || 'Which label best describes this item?';
   const t0 = Date.now();
   const { items, skipped } = collect(pos, flags);
@@ -962,7 +978,7 @@ async function cmdClassify({ pos, flags }) {
     type: 'choice',
     instructions: packed ? { question, answer_about: `Answer only about ${ref}; ignore the other items.` } : question,
     criteria,
-  }));
+  }), dflt);
   const groups = {};
   for (const r of rows) {
     groups[r.answer.choice] ??= [];
@@ -1108,10 +1124,13 @@ async function cmdAsk({ pos, flags }) {
     body = { state, questions: { answer: q } };
   }
   if (!body.state || !body.questions) die('spec needs "state" and "questions"');
+  if (flags.default !== undefined && !flags.choice) die('--default needs --choice');
+  // validated before any request: an unknown --default exits 1
+  const dflts = Object.fromEntries(Object.entries(body.questions).map(([id, q]) => [id, q?.type === 'choice' ? defaultLabel(q.criteria, flags) : undefined]));
   if (body.model !== undefined && (typeof body.model !== 'string' || !MODEL_RE.test(body.model))) die(`the ask spec's "model" must be a model id (${MODEL_RE.source})`);
   const states = chunkState(body.state);
   const replies = await pool(states.map((s) => () => jev(s.state, body.questions, body.model)), num(flags.concurrency, 16));
-  const answers = Object.fromEntries(Object.keys(body.questions).map((id) => [id, mergeChunks(replies.map((res, i) => ({ ...states[i], answer: res.answers[id] })))]));
+  const answers = Object.fromEntries(Object.keys(body.questions).map((id) => [id, mergeChunks(replies.map((res, i) => ({ ...states[i], answer: res.answers[id] })), dflts[id])]));
   const usage = { input_tokens: replies.reduce((a, res) => a + (res.usage?.input_tokens || 0), 0) };
   const lines = Object.entries(answers).map(([id, a]) => fmtAnswer(id, a));
   const stateText = typeof body.state === 'string' ? body.state : JSON.stringify(body.state);
@@ -1261,8 +1280,11 @@ INPUTS  files, directories (.gitignore respected), globs (Node 22+), - (stdin),
 CHUNKS  Nothing is truncated. An item longer than --chunk-chars is split at
         line ends into overlapping chunks (500 chars), each judged on its own;
         the highest-scoring chunk decides the item: filter and ask yes/no take
-        the highest probability, rank and ask --score the highest score,
-        classify and ask --choice the most confident chunk's label. Output
+        the highest probability, rank and ask --score the highest score.
+        classify and ask --choice: the default label is the last one (or
+        --default LABEL); a chunk whose label is the default does not vote,
+        the most confident voting chunk decides, and only if no chunk votes
+        is the item the default, at its best confidence. Output
         shows "(N chunks, best lines A-B)". Because any one chunk can make an
         item pass, ask positive questions ("does it contain X?"), not "does it
         lack X?".
@@ -1311,6 +1333,8 @@ OPTIONS
  accuracy --threshold 0.5 --band 0.15   filter: yes cutoff; cutoff±band = ?
           --labels "a:hint,b" classify, ask --choice: text after : is a hint
           --labels-json J|@f  classify: {"label": "description", ...}
+          --default LABEL     classify, ask --choice: the catch-all label
+                              (default: the last one); see CHUNKS
           --question "..."    classify: ask this instead of "which label?"
           --min-confidence 0.6  classify: below this is printed as ?
           --only a,b          classify: print only these labels

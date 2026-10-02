@@ -192,8 +192,12 @@ Nothing is truncated. A file or item longer than `--chunk-chars` (60,000
 characters, sized for Jev's 32k-token context) is split at line ends into
 overlapping chunks that are judged separately, and the highest-scoring chunk
 decides the item: the highest yes-probability for `filter`, the highest score
-for `rank` and `ask --score`, the most confident label for `classify` and
-`ask --choice`. The output says `(3 chunks, best lines 41-80)`. Because one
+for `rank` and `ask --score`. For `classify` and `ask --choice` the best real
+evidence wins: the last label (or the one named by `--default LABEL`) is the
+catch-all, a chunk whose label is the catch-all does not vote, and the most
+confident voting chunk decides; only when no chunk votes is the item the
+catch-all, at its best confidence. One chunk of `cli` at 0.9 beats four chunks
+of `other` at 0.99. The output says `(3 chunks, best lines 41-80)`. Because one
 chunk is enough to make a file pass, phrase questions positively ("Does this
 file send email?"), not as "Does this file lack X?".
 

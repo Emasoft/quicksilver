@@ -21,6 +21,7 @@ let postStatus = 200; // status the mock returns on POST /v1/systemone
 let failFor = {}; // Authorization header -> [status, body]: POSTs sent with that key fail this way
 let cfMode = 'ok'; // Workers AI route: ok | unsuccessful (success:false) | queued (a non-Completed state)
 let vercelConfidence = false; // Vercel route: whether providerMetadata carries a confidence per answer
+let labelRest = ['other', 0.99]; // LABELTEST mock: [label, confidence] of a chunk with no PICK marker
 let server, port, BASE, TMP, QHOME;
 
 function mockAnswer(body) {
@@ -30,6 +31,10 @@ function mockAnswer(body) {
   const state = JSON.stringify(body.state ?? '');
   const chunkTest = state.includes('CHUNKTEST');
   const hit = state.includes('NEEDLE');
+  // Label tests mark their content LABELTEST: a chunk holding PICK:<label>:<confidence> answers that label, any
+  // other chunk answers labelRest, so the per-chunk labels of one item can differ.
+  const labelTest = state.includes('LABELTEST');
+  const pick = state.match(/PICK:(\w+):(\d+(?:\.\d+)?)/);
   for (const [k, q] of Object.entries(body.questions || {})) {
     // choice answers must name real criteria keys (find looks the chosen line number up)
     const [c0, c1] = q.criteria && !Array.isArray(q.criteria) ? Object.keys(q.criteria) : ['a', 'b'];
@@ -38,6 +43,12 @@ function mockAnswer(body) {
       answers[k] = hit
         ? { type: q.type, noul: 0.95, choice: c0, confidence: 0.9, probabilities: { [c0]: 0.9, [c1]: 0.1 }, score: 4 }
         : { type: q.type, noul: 0.05, choice: c1, confidence: 0.8, probabilities: { [c0]: 0.2, [c1]: 0.8 }, score: 0 };
+    }
+    if (labelTest) {
+      const [choice, conf] = pick ? [pick[1], Number(pick[2])] : labelRest;
+      const keys = Object.keys(q.criteria);
+      const probabilities = Object.fromEntries(keys.map((l) => [l, l === choice ? conf : (1 - conf) / (keys.length - 1)]));
+      answers[k] = { type: q.type, choice, confidence: conf, probabilities };
     }
   }
   return { answers, usage: { input_tokens: 10 }, model: 'mock' };
@@ -105,6 +116,7 @@ beforeEach(() => {
   failFor = {};
   cfMode = 'ok';
   vercelConfidence = false;
+  labelRest = ['other', 0.99];
   QHOME = fs.mkdtempSync(path.join(TMP, 'home-'));
   // typesafe points at the mock; no other provider has a key in childEnv, so the chain is just typesafe.
   writeProviders([{ name: 'typesafe', base_url: BASE }]);
@@ -885,6 +897,66 @@ describe('chunking: a long item is split, never truncated', () => {
     assert.equal(b.code, 1);
     assert.match(b.stderr, /QUICKSILVER_CHUNK_CHARS/);
     assert.equal(reqs.length, 0);
+  });
+});
+
+describe('chunked labels: best real evidence wins over the default label', () => {
+  // 150 lines of 50 chars = 5 chunks at --chunk-chars 2000. PICK, when given, sits on line 75, inside one chunk only.
+  const doc = (pick) => Array.from({ length: 150 }, (_, i) => `LABELTEST line ${String(i + 1).padStart(3, '0')} ${i === 74 && pick ? `PICK:${pick}`.padEnd(30, '.') : '.'.repeat(30)}`).join('\n');
+  const picked = () => reqs.filter((q) => q.body.includes('PICK:')).length;
+
+  test('one chunk says cli 0.9, four say other (the default) 0.99: cli 0.9 from that chunk', async () => {
+    const dir = mkdir({ 'a.txt': doc('cli:0.9') });
+    const r = await qs(['classify', '--labels', 'cli,lib,other', 'a.txt', '--chunk-chars', '2000', '--json'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(reqs.length, 5);
+    assert.equal(picked(), 1);
+    const [row] = JSON.parse(r.stdout);
+    assert.deepEqual([row.label, row.confidence, row.chunks], ['cli', 0.9, 5]);
+    assert.ok(row.best_lines[0] <= 75 && row.best_lines[1] >= 75, String(row.best_lines));
+  });
+
+  test('every chunk says the default: the default at its best score across chunks', async () => {
+    const dir = mkdir({ 'a.txt': doc('other:0.995') });
+    const r = await qs(['classify', '--labels', 'cli,lib,other', 'a.txt', '--chunk-chars', '2000', '--json'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    const [row] = JSON.parse(r.stdout);
+    assert.deepEqual([row.label, row.confidence], ['other', 0.995]);
+    assert.ok(row.best_lines[0] <= 75 && row.best_lines[1] >= 75, String(row.best_lines));
+  });
+
+  test('--default names a middle label: the last label then votes like any other', async () => {
+    labelRest = ['lib', 0.99];
+    const dir = mkdir({ 'a.txt': doc('cli:0.6') });
+    const r = await qs(['classify', '--labels', 'cli,lib,other', '--default', 'lib', 'a.txt', '--chunk-chars', '2000', '--json'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout).map((x) => [x.label, x.confidence]), [['cli', 0.6]]);
+    // without --default, lib is just a label and its 0.99 chunks beat cli 0.6 (other is the default and absent)
+    reqs.length = 0;
+    const b = await qs(['classify', '--labels', 'cli,lib,other', 'a.txt', '--chunk-chars', '2000', '--json'], { cwd: dir });
+    assert.equal(b.code, 0, b.stderr);
+    assert.deepEqual(JSON.parse(b.stdout).map((x) => [x.label, x.confidence]), [['lib', 0.99]]);
+  });
+
+  test('--default that is not one of the labels exits 1 without a request', async () => {
+    const dir = mkdir({ 'a.txt': doc('cli:0.9') });
+    for (const args of [['classify', '--labels', 'cli,lib,other', '--default', 'nope', 'a.txt'],
+      ['ask', 'q?', '--state', '@a.txt', '--choice', 'cli,other', '--default', 'nope'],
+      ['ask', 'q?', '--state', '@a.txt', '--default', 'cli']]) {
+      const r = await qs(args, { cwd: dir });
+      assert.equal(r.code, 1, args.join(' ') + r.stdout + r.stderr);
+      assert.match(r.stderr, /--default/);
+    }
+    assert.equal(reqs.length, 0);
+  });
+
+  test('ask --choice: the same rule, one chunk of cli beats four of the default', async () => {
+    const dir = mkdir({ 'doc.txt': doc('cli:0.9') });
+    const r = await qs(['ask', 'q?', '--state', '@doc.txt', '--choice', 'cli,other', '--chunk-chars', '2000', '--json'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    const a = JSON.parse(r.stdout).answers.answer;
+    assert.deepEqual([a.choice, a.confidence], ['cli', 0.9]);
+    assert.ok(a.best_lines[0] <= 75 && a.best_lines[1] >= 75, String(a.best_lines));
   });
 });
 
