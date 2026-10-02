@@ -22,7 +22,10 @@ const costOf = (u) => u?.cost ?? (u?.input_tokens || 0) * PRICE_PER_TOKEN;
 
 const IGNORE_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', '.next', '.nuxt', '.svelte-kit',
   'target', 'vendor', '__pycache__', '.venv', 'venv', 'coverage', '.turbo', '.cache', '.idea', '.vscode']);
-const SECRET_RE = /(^|[\/\\])(\.env(\..*)?|.*\.(pem|key|p12|pfx|keystore|jks|crt|cer)|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|\.npmrc|\.pypirc|\.netrc|credentials(\.json)?|secrets?\.(json|ya?ml|toml))$/i;
+// Matched against the input-relative path. Beyond dotenv files, keys and certs it covers direnv, git, docker,
+// kube, postgres and htpasswd credentials, terraform vars/state, App Store .p8 and PuTTY keys, KeePass vaults,
+// VPN profiles, GPG files and cloud service-account keys: all were sent before (audit M2).
+const SECRET_RE = /(^|[/\\])(\.env(\..*)?|\.envrc|.*\.(pem|key|p12|pfx|keystore|jks|crt|cer|p8|ppk|kdbx|ovpn|gpg|tfvars|tfstate(\.backup)?)|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|\.npmrc|\.pypirc|\.netrc|\.git-credentials|\.pgpass|\.htpasswd|\.dockercfg|kubeconfig|\.docker[/\\]config\.json|service-account[^/\\]*\.json|credentials(\.json)?|secrets?\.(json|ya?ml|toml))$/i;
 const LOCK_RE = /(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|poetry\.lock|composer\.lock|\.min\.(js|css)|\.map)$/i;
 
 // ---------- args ----------
