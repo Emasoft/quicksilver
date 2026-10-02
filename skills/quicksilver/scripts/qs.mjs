@@ -467,7 +467,7 @@ async function jev(state, questions, specModel) {
     return r;
   }
   const e = RUN.lastError;
-  return die(CHAIN.length > 1 ? `every provider failed; the last one: ${e.message} (all of them in ${ERRORS_LOG})` : e.message, e.exit);
+  return die(CHAIN.length > 1 ? `every provider failed; the last one: ${withHint(e)} (all of them in ${ERRORS_LOG})` : withHint(e), e.exit);
 }
 
 // ISO 8601 local time with its offset, e.g. 2026-10-02T08:30:00+02:00 (Date.parse reads it back).
@@ -484,7 +484,7 @@ function isoNow(d = new Date()) {
 // end the run: it is reported once on stderr.
 let logWarned = false;
 function logError(p, model, e, fallback) {
-  const line = `${isoNow()} quicksilver/${VERSION} provider=${p.name} model=${model} kind=${e.kind} status=${e.status || '-'} fallback=${fallback} msg=${JSON.stringify(redact(e.message, p))}\n`;
+  const line = `${isoNow()} quicksilver/${VERSION} provider=${p.name} model=${model} kind=${e.kind} status=${e.status || '-'} fallback=${fallback} msg=${JSON.stringify(redact(e.message, p))}${e.hint ? ` hint=${JSON.stringify(e.hint)}` : ''}\n`;
   try {
     const cutoff = Date.now() - 72 * 3600e3;
     let old = '';
@@ -497,8 +497,11 @@ function logError(p, model, e, fallback) {
   }
 }
 
-// A provider failure: kind and HTTP status for the log, the exit code if it ends the run.
-const fail = (kind, status, message, exit) => Object.assign(new Error(message), { kind, status, exit });
+// A provider failure: kind and HTTP status for the log, the exit code if it ends the run. The message is one
+// complete sentence; what the user should do goes in `hint`, its own field in errors.log. Gluing the two into
+// one string produced "X rejected the API key (401) and run: ..." when the provider had no key_url.
+const fail = (kind, status, message, exit, hint) => Object.assign(new Error(message), { kind, status, exit, hint });
+const withHint = (e) => (e.hint ? `${e.message}. ${e.hint}` : e.message);
 const outOfCredits = (p, s) => `${p.name}: out of credits (${s})${p.key_url ? `. Top up at ${p.key_url.replace(/\/keys$/, '/credits')}` : ''}`;
 
 async function callProvider(p, model, state, questions, { retries = 5 } = {}) {
@@ -523,7 +526,7 @@ async function callProvider(p, model, state, questions, { retries = 5 } = {}) {
     if (res.ok) return decodeReply(p, adapter, text, questions);
     // exit 3 = account/key problem the user must fix (SKILL.md contract)
     if (s === 402 || /insufficient (credits|balance|funds)/i.test(text)) throw fail('no-credits', s, outOfCredits(p, s), 3);
-    if (s === 401 || s === 403) throw fail('key-rejected', s, `${p.name} rejected the API key (${s})${p.key_url ? `. Get a new one at ${p.key_url}` : ''} and run: node qs.mjs setup --provider ${p.name}`, 3);
+    if (s === 401 || s === 403) throw fail('key-rejected', s, `${p.name} rejected the API key (${s})`, 3, `${p.key_url ? `Get a new one at ${p.key_url}, then run` : 'Run'}: node qs.mjs setup --provider ${p.name}`);
     // ponytail: providers word "no such model" differently; a 400/422 naming the model as not found or
     // unavailable is read as model-unavailable (falls back) rather than a bad request. Extend the words as seen.
     if (s === 404 || ((s === 400 || s === 422) && /model/i.test(text) && /not found|not available|unavailable|unknown|not supported|not a valid|no endpoints|does not exist/i.test(text))) {

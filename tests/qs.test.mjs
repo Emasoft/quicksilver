@@ -1126,6 +1126,16 @@ describe('fallback: a failing provider hands the request to the next one', () =>
     assert.equal(fs.statSync(LOG()).mode & 0o777, 0o600);
   });
 
+  test('the logged key-rejected msg is a complete sentence, the setup hint a separate field, no key', async () => {
+    chain();
+    failFor['Bearer k2-secret'] = [401, '{"error":"bad key k2-secret"}'];
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { MOCK2_KEY: 'k2-secret' } });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(logLines()[0], / msg="mock2 rejected the API key \(401\)" hint="Run: node qs\.mjs setup --provider mock2"$/);
+    assert.doesNotMatch(fs.readFileSync(LOG(), 'utf8'), /k2-secret/);
+  });
+
   test('a failed provider is skipped for the rest of the run', async () => {
     chain();
     failFor['Bearer k2'] = [401];
