@@ -94,7 +94,8 @@ const parseJson = (text, what) => { try { return JSON.parse(text); } catch (e) {
 const estTokens = (s) => Math.ceil(s.length / 4);
 const rel = (p) => path.relative(process.cwd(), p).split(path.sep).join('/') || '.';
 const clip = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
-const f2 = (x) => x.toFixed(2);
+// A confidence can be null (the Vercel gateway may not report one): it prints as n/a instead of crashing.
+const f2 = (x) => (typeof x === 'number' ? x.toFixed(2) : 'n/a');
 
 // ---------- config / stats ----------
 
@@ -134,6 +135,10 @@ const BUILTINS = [
   { name: 'cloudflare', base_url: 'https://api.cloudflare.com/client/v4', path: '/accounts/{account_id}/ai/run', adapter: 'cloudflare-ai-run',
     api_key: ['$JEV_CLOUDFLARE_API_TOKEN', '$CLOUDFLARE_API_TOKEN'], account_id: '$CLOUDFLARE_ACCOUNT_ID', model: 'typesafe/jev', model_pattern: '^typesafe/',
     cost_field: null, usd_per_mtok: null, verify: '/user/tokens/verify', key_url: 'https://dash.cloudflare.com/profile/api-tokens' },
+  // The gateway replaces any model outside typesafe-ai/ with typesafe-ai/jev, so the pattern keeps ids honest. It
+  // has no free key check (verify null) and no published per-token price here.
+  { name: 'vercel', base_url: 'https://ai-gateway.vercel.sh', path: '/v4/ai/evaluation-model', adapter: 'vercel-evaluation', api_key: '$AI_GATEWAY_API_KEY',
+    model: 'typesafe-ai/jev', model_pattern: '^typesafe-ai/', cost_field: null, usd_per_mtok: null, verify: null },
 ];
 const FIELDS = ['name', 'enabled', 'base_url', 'path', 'adapter', 'api_key', 'account_id', 'model', 'model_pattern', 'cost_field', 'usd_per_mtok', 'verify', 'headers', 'key_url'];
 const REQUIRED = ['base_url', 'path', 'adapter', 'api_key', 'model']; // for a provider that is not built in
@@ -401,6 +406,23 @@ const ADAPTERS = {
       const outer = j.result;
       if (typeof outer?.state === 'string' && outer.state !== 'Completed') throw new Error(`Cloudflare run state is ${JSON.stringify(clip(outer.state, 40))}, not "Completed"`);
       return outer?.result ?? outer;
+    },
+  },
+  // Vercel AI Gateway evaluation model (jev-agent-tools transports/vercel.ts): the model rides in the ai-model-id
+  // header, not the body; noul questions are called "boolean" and only type, instructions and criteria are sent.
+  // A boolean answer comes back as a probability; a choice or score confidence lives in providerMetadata and may
+  // be missing (null); usage is camelCase.
+  'vercel-evaluation': {
+    encode: (model, state, questions) => ({
+      body: { state, questions: Object.fromEntries(Object.entries(questions).map(([id, q]) => [id, { type: q.type === 'noul' ? 'boolean' : q.type, instructions: q.instructions, criteria: q.criteria }])) },
+      headers: { 'ai-model-id': model, 'ai-gateway-protocol-version': '0.0.1', 'ai-gateway-auth-method': 'api-key', 'ai-evaluation-model-specification-version': '4' },
+    }),
+    decode: (j) => {
+      const conf = j?.providerMetadata?.typesafe?.confidence ?? {};
+      const adapt = (id, a) => (a?.type === 'boolean' ? { type: 'noul', noul: a.probability }
+        : a?.type === 'choice' || a?.type === 'score' ? { ...a, confidence: typeof conf[id] === 'number' ? conf[id] : null } : a);
+      const answers = isObj(j?.answers) ? Object.fromEntries(Object.entries(j.answers).map(([id, a]) => [id, adapt(id, a)])) : j?.answers;
+      return { ...j, answers, usage: { input_tokens: j?.usage?.inputTokens } };
     },
   },
 };
@@ -905,14 +927,16 @@ async function cmdClassify({ pos, flags }) {
     groups[r.answer.choice].push(r);
   }
   const only = flags.only ? new Set(String(flags.only).split(',')) : null;
-  const low = rows.filter((r) => r.answer.confidence < minConf);
+  // A null confidence is unknown, so it is listed for review with the low ones (null >= x is false).
+  const isLow = (r) => !(r.answer.confidence >= minConf);
+  const low = rows.filter(isLow);
   const lines = [Object.keys(criteria).map((k) => `${k} ${groups[k]?.length || 0}`).join(' · ')];
   for (const k of Object.keys(criteria)) {
     if (!groups[k] || (only && !only.has(k))) continue;
-    const g = groups[k].sort((a, b) => b.answer.confidence - a.answer.confidence);
+    const g = groups[k].sort((a, b) => (b.answer.confidence ?? -1) - (a.answer.confidence ?? -1));
     if (flags.verbose) {
       lines.push(`[${k}]`);
-      for (const r of g) lines.push(`${r.answer.confidence < minConf ? '?' : ' '}${f2(r.answer.confidence)}  ${label(r, flags)}`);
+      for (const r of g) lines.push(`${isLow(r) ? '?' : ' '}${f2(r.answer.confidence)}  ${label(r, flags)}`);
     } else {
       const ok = g.filter((r) => r.answer.confidence >= minConf).map((r) => r.item.id);
       if (ok.length) lines.push(`[${k}] ${ok.join(' ')}`);

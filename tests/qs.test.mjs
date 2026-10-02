@@ -20,6 +20,7 @@ let verifyStatus = 200; // status the mock returns on the key-verify GET
 let postStatus = 200; // status the mock returns on POST /v1/systemone
 let failFor = {}; // Authorization header -> [status, body]: POSTs sent with that key fail this way
 let cfMode = 'ok'; // Workers AI route: ok | unsuccessful (success:false) | queued (a non-Completed state)
+let vercelConfidence = false; // Vercel route: whether providerMetadata carries a confidence per answer
 let server, port, BASE, TMP, QHOME;
 
 function mockAnswer(body) {
@@ -47,7 +48,7 @@ before(async () => {
     let b = '';
     q.on('data', (c) => (b += c));
     q.on('end', () => {
-      reqs.push({ method: q.method, url: q.url, auth: q.headers.authorization || '', body: b });
+      reqs.push({ method: q.method, url: q.url, auth: q.headers.authorization || '', body: b, headers: q.headers });
       r.setHeader('content-type', 'application/json');
       if (q.method === 'GET') { r.statusCode = verifyStatus; return r.end('{"data":[]}'); }
       if (postStatus !== 200) { r.statusCode = postStatus; return r.end('{"error":"mock"}'); }
@@ -60,6 +61,19 @@ before(async () => {
         if (cfMode === 'unsuccessful') return r.end(JSON.stringify({ success: false, errors: [{ message: 'mock' }], result: null }));
         const result = cfMode === 'queued' ? { state: 'Queued' } : { state: 'Completed', result: mockAnswer(body.input) };
         return r.end(JSON.stringify({ success: true, errors: [], result }));
+      }
+      // Vercel AI Gateway: no model in the body, boolean (not noul) answers with a probability, confidence only
+      // in providerMetadata, camelCase usage
+      if (q.url === '/v4/ai/evaluation-model') {
+        const answers = {}, confidence = {};
+        for (const [k, qq] of Object.entries(body.questions)) {
+          const c = qq.criteria && !Array.isArray(qq.criteria) ? Object.keys(qq.criteria) : ['a', 'b'];
+          answers[k] = qq.type === 'boolean' ? { type: 'boolean', probability: 0.9 }
+            : qq.type === 'choice' ? { type: 'choice', choice: c[0], probabilities: { [c[0]]: 0.7, [c[1]]: 0.3 } }
+              : { type: 'score', score: 3, probabilities: { 3: 1 } };
+          confidence[k] = 0.7;
+        }
+        return r.end(JSON.stringify({ answers, usage: { inputTokens: 7, outputTokens: 0 }, ...(vercelConfidence ? { providerMetadata: { typesafe: { confidence } } } : {}) }));
       }
       r.end(JSON.stringify(mockAnswer(body)));
     });
@@ -90,6 +104,7 @@ beforeEach(() => {
   postStatus = 200;
   failFor = {};
   cfMode = 'ok';
+  vercelConfidence = false;
   QHOME = fs.mkdtempSync(path.join(TMP, 'home-'));
   // typesafe points at the mock; no other provider has a key in childEnv, so the chain is just typesafe.
   writeProviders([{ name: 'typesafe', base_url: BASE }]);
@@ -877,6 +892,7 @@ describe('providers.json: the array order is the chain', () => {
     assert.match(r.stdout, /^2\. typesafe +key missing \(\$JEV_API_KEY, \$TYPESAFE_API_KEY\)$/m);
     assert.match(r.stdout, /^3\. compatible +not configured \(no base_url\)$/m);
     assert.match(r.stdout, /^4\. cloudflare +key missing \(\$JEV_CLOUDFLARE_API_TOKEN, \$CLOUDFLARE_API_TOKEN\)$/m);
+    assert.match(r.stdout, /^5\. vercel +key missing \(\$AI_GATEWAY_API_KEY\)$/m);
   });
 
   test('file entries come first, in file order, then the built-ins the file does not name', async () => {
@@ -1233,5 +1249,74 @@ describe('cloudflare-ai-run adapter (built-in cloudflare, pointed at the mock)',
     const r = await qs(['status'], { env: cfEnv });
     assert.match(r.stdout, /^1\. cloudflare +ready · key \$CLOUDFLARE_API_TOKEN · model typesafe\/jev$/m);
     assert.equal(reqs[0].url, '/user/tokens/verify');
+  });
+});
+
+describe('vercel-evaluation adapter (built-in vercel, pointed at the mock)', () => {
+  const vEnv = { AI_GATEWAY_API_KEY: 'vg-key' };
+  const vFirst = () => writeProviders([{ name: 'vercel', base_url: BASE }]);
+
+  test('model in the ai-model-id header, noul sent as boolean, probability read back as noul', async () => {
+    vFirst();
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: vEnv });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /0\.90 {2}a\.txt/);
+    const [q] = reqs;
+    assert.equal(q.url, '/v4/ai/evaluation-model');
+    assert.equal(q.auth, 'Bearer vg-key');
+    assert.equal(q.headers['ai-model-id'], 'typesafe-ai/jev');
+    assert.equal(q.headers['ai-gateway-protocol-version'], '0.0.1');
+    assert.equal(q.headers['ai-gateway-auth-method'], 'api-key');
+    assert.equal(q.headers['ai-evaluation-model-specification-version'], '4');
+    const body = JSON.parse(q.body);
+    assert.equal(body.model, undefined);
+    assert.deepEqual(Object.keys(body.questions.q0).sort(), ['instructions', 'type']);
+    assert.equal(body.questions.q0.type, 'boolean');
+    assert.match(r.stdout, /jev 7 tok/); // camelCase inputTokens
+  });
+
+  test('classify without a confidence: printed as n/a, counted as low confidence, null in JSON', async () => {
+    vFirst();
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['classify', '--labels', 'x,y', 'a.txt'], { cwd: dir, env: vEnv });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /\?n\/a {2}x \(or y\) {2}a\.txt/);
+    const j = await qs(['classify', '--labels', 'x,y', 'a.txt', '--json', '--verbose'], { cwd: dir, env: vEnv });
+    assert.equal(j.code, 0, j.stderr);
+    assert.equal(JSON.parse(j.stdout)[0].confidence, null);
+  });
+
+  test('classify --verbose, rank and ask --score survive a null confidence', async () => {
+    vFirst();
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    for (const args of [['classify', '--labels', 'x,y', 'a.txt', '--verbose'], ['rank', 'q', 'a.txt'], ['ask', 'q?', '--state', 'text', '--score', 'lo|mid|hi|top'], ['ask', 'q?', '--state', 'text', '--choice', 'x,y']]) {
+      const r = await qs(args, { cwd: dir, env: vEnv });
+      assert.equal(r.code, 0, `${args.join(' ')}\n${r.stderr}`);
+      assert.doesNotMatch(r.stderr, /unexpected error/);
+    }
+  });
+
+  test('a confidence in providerMetadata is used', async () => {
+    vFirst();
+    vercelConfidence = true;
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['classify', '--labels', 'x,y', 'a.txt', '--json'], { cwd: dir, env: vEnv });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(JSON.parse(r.stdout)[0].confidence, 0.7);
+  });
+
+  test('setup in a fresh home writes every built-in by name, dir 0700, file 0600, nothing else', async () => {
+    const home = path.join(QHOME, 'fresh');
+    const r = await qs(['setup', '--provider', 'vercel'], { env: { QUICKSILVER_HOME: home }, input: 'vg-saved\n' });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /vercel key saved to/); // no free check, so not "verified"
+    assert.equal(fs.statSync(home).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(path.join(home, 'providers.json')).mode & 0o777, 0o600);
+    assert.deepEqual(fs.readdirSync(home), ['providers.json']);
+    const doc = JSON.parse(fs.readFileSync(path.join(home, 'providers.json'), 'utf8'));
+    assert.deepEqual(doc.providers.map((e) => e.name), ['openrouter', 'typesafe', 'compatible', 'cloudflare', 'vercel']);
+    assert.equal(doc.providers[4].api_key, 'vg-saved');
+    assert.equal(reqs.length, 0);
   });
 });
