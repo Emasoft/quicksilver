@@ -1069,7 +1069,7 @@ async function cmdAsk({ pos, flags }) {
   if (body.model !== undefined && (typeof body.model !== 'string' || !MODEL_RE.test(body.model))) die(`the ask spec's "model" must be a model id (${MODEL_RE.source})`);
   const states = chunkState(body.state);
   const replies = await pool(states.map((s) => () => jev(s.state, body.questions, body.model)), num(flags.concurrency, 16));
-  const answers = Object.fromEntries(Object.keys(body.questions).map((id) => [id, mergeChunks(replies.map((res, i) => ({ answer: res.answers[id], from: states[i].from, to: states[i].to })))]));
+  const answers = Object.fromEntries(Object.keys(body.questions).map((id) => [id, mergeChunks(replies.map((res, i) => ({ ...states[i], answer: res.answers[id] })))]));
   const usage = { input_tokens: replies.reduce((a, res) => a + (res.usage?.input_tokens || 0), 0) };
   const lines = Object.entries(answers).map(([id, a]) => fmtAnswer(id, a));
   const stateText = typeof body.state === 'string' ? body.state : JSON.stringify(body.state);
