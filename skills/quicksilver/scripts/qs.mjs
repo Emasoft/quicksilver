@@ -246,8 +246,12 @@ function readStdin() {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-// A file the user named for --items, --state @f, ask spec.json or --labels-json @f.
-function readInputFile(file) {
+// A file the user named for --items, --state @f, ask spec.json or --labels-json @f. Naming a file is not
+// consent to send a credential: same secret guard as scanned files, on the name and the symlink target (audit m7).
+function readInputFile(file, flags) {
+  if (!flags['no-secrets-guard'] && [file, fs.realpathSync(file)].some((p) => SECRET_RE.test(p))) {
+    die(`${file} looks like a secret file and is never sent (--no-secrets-guard overrides)`);
+  }
   if (fs.statSync(file).size > MAX_BYTES) die(`${file} is over ${MAX_BYTES / 1048576} MB; split it`);
   return fs.readFileSync(file, 'utf8');
 }
@@ -267,7 +271,7 @@ function collect(pos, flags) {
   const pushLines = (name, text) => text.split(/\r?\n/).forEach((l, i) => { if (l.trim()) push(`${name}:${i + 1}`, l); });
 
   if (flags.items) {
-    const raw = flags.items === '-' ? readStdin() : readInputFile(flags.items);
+    const raw = flags.items === '-' ? readStdin() : readInputFile(flags.items, flags);
     for (const [i, line] of raw.split(/\r?\n/).entries()) {
       if (!line.trim()) continue;
       // A line that opens an object must be valid JSON: falling back to plain text (as before) silently
@@ -440,7 +444,7 @@ async function cmdFilter({ pos, flags }) {
 function parseLabels(flags) {
   if (flags['labels-json']) {
     const raw = String(flags['labels-json']);
-    return parseJson(raw.startsWith('@') ? readInputFile(raw.slice(1)) : raw, '--labels-json');
+    return parseJson(raw.startsWith('@') ? readInputFile(raw.slice(1), flags) : raw, '--labels-json');
   }
   if (!flags.labels) die('classify needs --labels "a,b,c" or --labels-json \'{"a":"description"}\'');
   return Object.fromEntries(String(flags.labels).split(',').map((s) => s.trim()).filter(Boolean).map((l) => {
@@ -571,10 +575,10 @@ function fmtAnswer(id, a) {
   return `${id}  ${JSON.stringify(a)}`;
 }
 
-function readStateArg(v) {
+function readStateArg(v, flags) {
   if (v === undefined) return undefined;
   if (v === '-') return readStdin();
-  if (typeof v === 'string' && v.startsWith('@')) return readInputFile(v.slice(1));
+  if (typeof v === 'string' && v.startsWith('@')) return readInputFile(v.slice(1), flags);
   return v;
 }
 
@@ -583,11 +587,11 @@ async function cmdAsk({ pos, flags }) {
   let body;
   const first = pos[0];
   if (first && (first === '-' || first.endsWith('.json')) && !flags.state) {
-    body = parseJson(first === '-' ? readStdin() : readInputFile(first), first === '-' ? 'ask spec on stdin' : first);
+    body = parseJson(first === '-' ? readStdin() : readInputFile(first, flags), first === '-' ? 'ask spec on stdin' : first);
   } else {
     const question = pos.join(' ');
     if (!question) die('usage: ask "<question>" --state @file|text|- [--choice "a,b" | --score "low|mid|high"]  or  ask spec.json');
-    const state = readStateArg(flags.state);
+    const state = readStateArg(flags.state, flags);
     if (state === undefined) die('ask needs --state (@file, literal text, or - for stdin)');
     let q = { type: 'noul', instructions: question };
     if (flags.choice) q = { type: 'choice', instructions: question, criteria: parseLabels({ labels: flags.choice }) };
