@@ -19,6 +19,7 @@ const reqs = []; // every request the mock received: { method, url, auth, body }
 let verifyStatus = 200; // status the mock returns on the key-verify GET
 let postStatus = 200; // status the mock returns on POST /v1/systemone
 let failFor = {}; // Authorization header -> [status, body]: POSTs sent with that key fail this way
+let cfMode = 'ok'; // Workers AI route: ok | unsuccessful (success:false) | queued (a non-Completed state)
 let server, port, BASE, TMP, QHOME;
 
 function mockAnswer(body) {
@@ -53,7 +54,14 @@ before(async () => {
       const f = failFor[q.headers.authorization];
       // a tiny Retry-After keeps the 429/5xx retries of the fallback tests fast
       if (f) { r.statusCode = f[0]; r.setHeader('retry-after', '0.001'); return r.end(f[1] ?? '{"error":"mock"}'); }
-      r.end(JSON.stringify(mockAnswer(JSON.parse(b))));
+      const body = JSON.parse(b);
+      // Cloudflare Workers AI: {model, input: {state, questions}} in, the v4 envelope (result.result) out
+      if (q.url.endsWith('/ai/run')) {
+        if (cfMode === 'unsuccessful') return r.end(JSON.stringify({ success: false, errors: [{ message: 'mock' }], result: null }));
+        const result = cfMode === 'queued' ? { state: 'Queued' } : { state: 'Completed', result: mockAnswer(body.input) };
+        return r.end(JSON.stringify({ success: true, errors: [], result }));
+      }
+      r.end(JSON.stringify(mockAnswer(body)));
     });
   });
   // '::' is dual-stack, so the mock is also reachable as an IPv4-mapped IPv6 address (the m2 test).
@@ -81,6 +89,7 @@ beforeEach(() => {
   verifyStatus = 200;
   postStatus = 200;
   failFor = {};
+  cfMode = 'ok';
   QHOME = fs.mkdtempSync(path.join(TMP, 'home-'));
   // typesafe points at the mock; no other provider has a key in childEnv, so the chain is just typesafe.
   writeProviders([{ name: 'typesafe', base_url: BASE }]);
@@ -867,6 +876,7 @@ describe('providers.json: the array order is the chain', () => {
     assert.match(r.stdout, /^1\. openrouter +key missing \(\$OPENROUTER_API_KEY\)$/m);
     assert.match(r.stdout, /^2\. typesafe +key missing \(\$JEV_API_KEY, \$TYPESAFE_API_KEY\)$/m);
     assert.match(r.stdout, /^3\. compatible +not configured \(no base_url\)$/m);
+    assert.match(r.stdout, /^4\. cloudflare +key missing \(\$JEV_CLOUDFLARE_API_TOKEN, \$CLOUDFLARE_API_TOKEN\)$/m);
   });
 
   test('file entries come first, in file order, then the built-ins the file does not name', async () => {
@@ -1163,5 +1173,65 @@ describe('fallback: a failing provider hands the request to the next one', () =>
     const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { MOCK2_KEY: 'k2', MOCK3_KEY: 'k3' } });
     assert.equal(r.code, 0, r.stderr);
     assert.equal(r.stderr.match(/warning: could not write .*errors\.log/g)?.length, 1, r.stderr);
+  });
+});
+
+describe('cloudflare-ai-run adapter (built-in cloudflare, pointed at the mock)', () => {
+  const ACCT = '0123456789abcdef0123456789abcdef';
+  const cfEnv = { CLOUDFLARE_API_TOKEN: 'cf-token', CLOUDFLARE_ACCOUNT_ID: ACCT };
+  const cfFirst = () => writeProviders([{ name: 'cloudflare', base_url: BASE }, { name: 'typesafe', base_url: BASE }]);
+
+  test('the request is wrapped in input, sent to the account URL, and the nested reply is read', async () => {
+    cfFirst();
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: cfEnv });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /0\.90 {2}a\.txt/);
+    assert.equal(reqs[0].url, `/accounts/${ACCT}/ai/run`);
+    assert.equal(reqs[0].auth, 'Bearer cf-token');
+    const body = JSON.parse(reqs[0].body);
+    assert.equal(body.model, 'typesafe/jev');
+    assert.match(body.input.state.content, /hello-a/);
+    assert.ok(body.input.questions.q0);
+    assert.match(r.stdout, /via cloudflare \(mock\)/);
+    assert.match(r.stdout, /\$0\.0000 \+ n\/a/); // no price is known for Cloudflare
+  });
+
+  for (const [mode, why] of [['unsuccessful', /success: false/], ['queued', /run state is .*Queued/]]) {
+    test(`a ${mode} envelope falls back to the next provider and is logged`, async () => {
+      cfFirst();
+      cfMode = mode;
+      const dir = mkdir({ 'a.txt': 'hello-a' });
+      const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: cfEnv });
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /cloudflare → typesafe \(unusable reply, HTTP 200\)/);
+      assert.match(fs.readFileSync(path.join(QHOME, 'errors.log'), 'utf8'), why);
+    });
+  }
+
+  test('without the account id it is skipped silently, and status names the variable', async () => {
+    cfFirst();
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { CLOUDFLARE_API_TOKEN: 'cf-token' } });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.stderr, '');
+    assert.equal(reqs[0].auth, `Bearer ${KEY}`);
+    const s = await qs(['status'], { env: { CLOUDFLARE_API_TOKEN: 'cf-token' } });
+    assert.match(s.stdout, /^1\. cloudflare +account id missing \(\$CLOUDFLARE_ACCOUNT_ID\)$/m);
+  });
+
+  test('an account id that could change the URL path exits 1', async () => {
+    cfFirst();
+    const r = await qs(['status'], { env: { ...cfEnv, CLOUDFLARE_ACCOUNT_ID: '../../evil' } });
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /account id from \$CLOUDFLARE_ACCOUNT_ID/);
+    assert.equal(reqs.length, 0);
+  });
+
+  test('status checks the token with the free verify route', async () => {
+    cfFirst();
+    const r = await qs(['status'], { env: cfEnv });
+    assert.match(r.stdout, /^1\. cloudflare +ready · key \$CLOUDFLARE_API_TOKEN · model typesafe\/jev$/m);
+    assert.equal(reqs[0].url, '/user/tokens/verify');
   });
 });

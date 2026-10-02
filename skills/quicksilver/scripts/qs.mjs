@@ -129,6 +129,11 @@ const BUILTINS = [
   { name: 'typesafe', base_url: 'https://api.typesafe.ai', path: '/v1/systemone', adapter: 'system-one', api_key: ['$JEV_API_KEY', '$TYPESAFE_API_KEY'],
     model: 'jev-latest', model_pattern: '^[^/]+$', cost_field: 'usage.cost', usd_per_mtok: 0.042, verify: '/v1/models', key_url: 'https://console.typesafe.ai' },
   { name: 'compatible', path: '/v1/systemone', adapter: 'system-one', api_key: '$JEV_GATEWAY_API_KEY', model: 'jev-latest', cost_field: 'usage.cost' },
+  // Workers AI serves Jev only as the unpinned alias typesafe/jev; Cloudflare bills it in its own dashboard, so
+  // the price is unknown here (usd_per_mtok null: the receipt says the cost is incomplete).
+  { name: 'cloudflare', base_url: 'https://api.cloudflare.com/client/v4', path: '/accounts/{account_id}/ai/run', adapter: 'cloudflare-ai-run',
+    api_key: ['$JEV_CLOUDFLARE_API_TOKEN', '$CLOUDFLARE_API_TOKEN'], account_id: '$CLOUDFLARE_ACCOUNT_ID', model: 'typesafe/jev', model_pattern: '^typesafe/',
+    cost_field: null, usd_per_mtok: null, verify: '/user/tokens/verify', key_url: 'https://dash.cloudflare.com/profile/api-tokens' },
 ];
 const FIELDS = ['name', 'enabled', 'base_url', 'path', 'adapter', 'api_key', 'account_id', 'model', 'model_pattern', 'cost_field', 'usd_per_mtok', 'verify', 'headers', 'key_url'];
 const REQUIRED = ['base_url', 'path', 'adapter', 'api_key', 'model']; // for a provider that is not built in
@@ -385,6 +390,18 @@ const ADAPTERS = {
   'system-one': {
     encode: (model, state, questions) => ({ body: { model, state, questions } }),
     decode: (j) => j,
+  },
+  // Cloudflare Workers AI (jev-agent-tools transports/cloudflare.ts): the System One request goes inside "input",
+  // and the reply is the v4 envelope, nested twice (result.result). success:false, or a run state other than
+  // Completed, is an unusable reply even with HTTP 200.
+  'cloudflare-ai-run': {
+    encode: (model, state, questions) => ({ body: { model, input: { state, questions } } }),
+    decode: (j) => {
+      if (!isObj(j) || j.success === false) throw new Error('Cloudflare reported success: false');
+      const outer = j.result;
+      if (typeof outer?.state === 'string' && outer.state !== 'Completed') throw new Error(`Cloudflare run state is ${JSON.stringify(clip(outer.state, 40))}, not "Completed"`);
+      return outer?.result ?? outer;
+    },
   },
 };
 
