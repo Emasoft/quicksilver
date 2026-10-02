@@ -44,7 +44,8 @@ function parseArgs(argv) {
       const name = a.slice(2);
       if (bools.has(name) || i + 1 >= argv.length || argv[i + 1].startsWith('--')) flags[name] = true;
       else flags[name] = argv[++i];
-    } else pos.push(a);
+    } else if (a === '-h') flags.help = true;
+    else pos.push(a);
   }
   return { pos, flags };
 }
@@ -764,7 +765,9 @@ process.on('unhandledRejection', (e) => die(`unexpected error: ${e?.stack || e}`
 process.on('uncaughtException', (e) => die(`unexpected error: ${e?.stack || e}`, 5));
 
 const [cmd, ...rest] = process.argv.slice(2);
-// `qs <command> --help` must show help too, not fail on the missing arguments.
-if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h' || rest.includes('--help') || rest.includes('-h')) { console.log(HELP); process.exit(0); }
+const args = parseArgs(rest);
+// `qs <command> --help` must show help too, not fail on the missing arguments. Help comes from the parsed
+// flags, so a flag's value (`--state -h`, `--labels -h`) or anything after `--` never triggers it.
+if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h' || args.flags.help) { console.log(HELP); process.exit(0); }
 if (!COMMANDS[cmd]) die(`unknown command "${cmd}"\n\n${HELP}`);
-await COMMANDS[cmd](parseArgs(rest));
+await COMMANDS[cmd](args);
