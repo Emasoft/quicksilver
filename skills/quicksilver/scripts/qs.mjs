@@ -1444,8 +1444,21 @@ const COMMANDS = Object.fromEntries(Object.entries({ setup: cmdSetup, status: cm
     return fn(args);
   }]));
 
-// Read by the docs tests (tests/docs.test.mjs) to check HELP, README.md and SKILL.md against the code.
-export { HELP, OPTIONS, BUILTINS, FIELDS, TRUE_WORDS, FALSE_WORDS, EXIT, EXIT_MEANING };
+// For the installer's hints (bin/quicksilver.mjs), resolved exactly as resolveProvider and cmdSetup do, so a hint
+// names the provider setup really targeted: the pin, else the chain head setup picks. `vars` are that provider's key
+// variables in the table's order; `exported` is the variable the first ready provider in the chain reads (none when
+// nothing is ready or its key is a literal), i.e. the key quicksilver keeps using after a failed setup.
+function installHint(pin) {
+  const all = buildProviders(readProvidersFile() ?? builtinNames()).map(prepare);
+  const b = pin && !all.some((x) => x.name === pin) && BUILTINS.find((x) => x.name === pin);
+  const t = pin ? (b ? prepare(checkEntry({ ...b }, `built-in provider "${b.name}"`)) : all.find((x) => x.name === pin)) : all.find((x) => x.enabled && x.base_url);
+  const ready = (pin ? [t] : all).find((p) => p?.state === 'ready');
+  return { name: t?.name, vars: t ? varNames(t.api_key) : [], key_url: t?.key_url, exported: ready?.keySource.startsWith('$') ? ready.keySource.slice(1) : null };
+}
+
+// Read by the docs tests (tests/docs.test.mjs) to check HELP, README.md and SKILL.md against the code, and by the
+// installer (installHint, varNames).
+export { HELP, OPTIONS, BUILTINS, FIELDS, TRUE_WORDS, FALSE_WORDS, EXIT, EXIT_MEANING, installHint, varNames };
 
 // The CLI runs only when this file is executed (node qs.mjs ...). Importing it, as the docs tests do, must not
 // parse process.argv, install the crash handlers or exit.

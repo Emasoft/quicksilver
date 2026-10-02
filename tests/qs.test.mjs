@@ -547,8 +547,31 @@ describe('installer exit codes', () => {
     const r = await install(['install', '--key', 'k-bad', '--provider', 'typesafe'], { JEV_API_KEY: undefined });
     assert.equal(r.code, 3, r.stdout + r.stderr);
     assert.match(r.stderr, /rejected/);
-    assert.match(r.stderr, /Setup failed.*skill is installed/);
+    assert.match(r.stderr, /Setup failed: the key was not saved/);
+    // The hint never puts a key on a command line: export the target provider's variables, or the hidden prompt.
+    assert.match(r.stderr, /Export JEV_API_KEY or TYPESAFE_API_KEY in your shell profile/);
+    assert.match(r.stderr, /npx github:Emasoft\/quicksilver setup --provider typesafe /);
+    assert.match(r.stderr, /npx github:Emasoft\/quicksilver uninstall removes it/);
+    assert.doesNotMatch(r.stderr, /setup KEY|still in use/); // no provider is ready, so no "still in use"
     assert.doesNotMatch(r.stdout, /Done\.|Try asking/);
+  });
+
+  test('a rejected --key names the exported key the first ready provider still uses', async () => {
+    verifyStatus = 401;
+    const r = await install(['install', '--key', 'k-bad', '--provider', 'typesafe']); // JEV_API_KEY exported
+    assert.equal(r.code, 3, r.stdout + r.stderr);
+    assert.match(r.stderr, /Your exported JEV_API_KEY is still in use/);
+  });
+
+  test('install --provider openrouter with no key and no TTY exits 0 and names the real home', async () => {
+    // Every provider's key variable unset (names from the code's table), so the result never depends on this machine.
+    const { BUILTINS, varNames } = await import('../skills/quicksilver/scripts/qs.mjs');
+    const noKeys = Object.fromEntries(BUILTINS.flatMap((b) => varNames(b.api_key)).map((n) => [n, undefined]));
+    const r = await install(['install', '--provider', 'openrouter'], noKeys);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /Next: export OPENROUTER_API_KEY/);
+    assert.ok(r.stdout.includes(path.join(QHOME, 'providers.json')), r.stdout);
+    assert.doesNotMatch(r.stdout, /~\/\.quicksilver/);
   });
 
   test('uninstall exits 0 and names the real QUICKSILVER_HOME', async () => {
