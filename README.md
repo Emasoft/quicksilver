@@ -58,7 +58,7 @@ npx github:UditAkhourii/quicksilver setup YOUR_OPENROUTER_KEY --provider openrou
 git clone https://github.com/UditAkhourii/quicksilver && cd quicksilver && ./install.sh   # or .\install.ps1
 ```
 
-`JEV_API_KEY`, `TYPESAFE_API_KEY` or `OPENROUTER_API_KEY` in your environment also works. Needs Node 18+.
+`JEV_API_KEY`, `TYPESAFE_API_KEY` or `OPENROUTER_API_KEY` in your environment also works. If `OPENROUTER_API_KEY` is set, Quicksilver uses OpenRouter automatically, even over a saved TypeSafe key; pass `--provider typesafe` (or set `QUICKSILVER_PROVIDER=typesafe`) to keep TypeSafe. Needs Node 18+.
 No npm dependencies.
 </details>
 
@@ -162,6 +162,7 @@ a vibe.
   provider, through openrouter.ai, whose own data and logging policy then applies. TypeSafe states that Jev
   is not trained on customer data. Don't point it at anything you can't send to
   a third party.
+- Exporting `OPENROUTER_API_KEY` routes content and billing through openrouter.ai.
 - The key is stored in `~/.quicksilver/config.json` with user-only permissions.
   `npx github:UditAkhourii/quicksilver setup --remove` deletes it.
 

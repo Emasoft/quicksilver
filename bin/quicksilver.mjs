@@ -29,7 +29,7 @@ if (cmd === 'install') {
   console.log(`${c('36', '☿ quicksilver')} skill installed → ${DEST}`);
 
   const keyFlag = rest.find((a) => a.startsWith('--key='))?.slice(6) || (rest.includes('--key') ? rest[rest.indexOf('--key') + 1] : '');
-  const providerArgs = rest.flatMap((a, i) => (a === '--provider' ? [a, rest[i + 1]] : a.startsWith('--provider=') ? [a] : []));
+  const providerArgs = rest.flatMap((a, i) => (a === '--provider' ? (typeof rest[i + 1] === 'string' && !rest[i + 1].startsWith('--') ? [a, rest[i + 1]] : []) : a.startsWith('--provider=') ? [a] : []));
   const ready = spawnSync(process.execPath, [QS, 'status'], { stdio: 'ignore' }).status === 0;
   if (keyFlag) run(['setup', keyFlag, ...providerArgs]);
   else if (!ready) {

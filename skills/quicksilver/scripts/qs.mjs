@@ -7,6 +7,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 
+// Same API on both providers, but keys are not interchangeable: each provider reads only its own env vars.
 const PROVIDERS = {
   typesafe: { base: 'https://api.typesafe.ai', verify: '/v1/models', model: 'jev-latest', keyUrl: 'https://console.typesafe.ai', env: ['JEV_API_KEY', 'TYPESAFE_API_KEY'] },
   openrouter: { base: 'https://openrouter.ai/api', verify: '/v1/key', model: '~typesafe/jev-latest', keyUrl: 'https://openrouter.ai/settings/keys', env: ['OPENROUTER_API_KEY'] },
@@ -15,7 +16,6 @@ const HOME = process.env.QUICKSILVER_HOME || path.join(os.homedir(), '.quicksilv
 const CONFIG = path.join(HOME, 'config.json');
 const STATS = path.join(HOME, 'stats.json');
 let PROVIDER, API; // resolved once from flags/env/config by resolveProvider()
-// Same API on both providers, but keys are not interchangeable: each provider reads only its own env vars.
 // PRICE_PER_TOKEN is the fallback when a response carries no `usage.cost` (typesafe direct).
 const PRICE_PER_TOKEN = 0.042 / 1e6;
 const costOf = (u) => u?.cost ?? (u?.input_tokens || 0) * PRICE_PER_TOKEN;
@@ -74,9 +74,12 @@ function resolveProvider(flags) {
   const cfg = readJson(CONFIG, {});
   const e = process.env;
   // user requirement: an OpenRouter key in the env always wins unless a provider is named explicitly
+  if (flags.provider === true) die('--provider needs a value (typesafe|openrouter)');
   PROVIDER = flags.provider || e.QUICKSILVER_PROVIDER || (e.OPENROUTER_API_KEY ? 'openrouter' : '') || cfg.provider || 'typesafe';
   if (!PROVIDERS[PROVIDER]) die(`unknown provider "${PROVIDER}" (use ${Object.keys(PROVIDERS).join('|')})`);
-  API = (e.QUICKSILVER_API_BASE || PROVIDERS[PROVIDER].base).replace(/\/$/, '');
+  // QUICKSILVER_API_BASE is a TypeSafe-proxy override only: an OPENROUTER_API_KEY in env switches provider
+  // automatically, so a provider-agnostic override would send the OpenRouter key to a TypeSafe proxy.
+  API = ((PROVIDER === 'typesafe' && e.QUICKSILVER_API_BASE) || PROVIDERS[PROVIDER].base).replace(/\/$/, '');
 }
 
 function modelName(flags) {
@@ -567,7 +570,10 @@ async function cmdSetup({ pos, flags }) {
   const key = (pos[0] || (await promptHidden(`Paste your ${PROVIDER} API key (from ${keyUrl}): `))).trim();
   if (!key) die(`no key given. Get one at ${keyUrl}`);
   const res = await fetch(API + verify, { headers: { Authorization: `Bearer ${key}` } }).catch((e) => die(`network error: ${e.message}`));
-  if (res.status === 401 || res.status === 403) die(`that key was rejected by ${PROVIDER} (${res.status}). Double-check it at ${keyUrl}`, 3);
+  if (res.status === 401 || res.status === 403) {
+    const auto = PROVIDER === 'openrouter' && !flags.provider && !process.env.QUICKSILVER_PROVIDER && process.env.OPENROUTER_API_KEY;
+    die(`that key was rejected by ${PROVIDER} (${res.status}). Double-check it at ${keyUrl}` + (auto ? ' (OPENROUTER_API_KEY is set, so setup assumed openrouter; for a Jev/TypeSafe key add --provider typesafe)' : ''), 3);
+  }
   if (!res.ok) die(`could not verify key: HTTP ${res.status}`);
   const cfg = readJson(CONFIG, {});
   // A model name saved for the other provider is meaningless here (different id), so drop it.
@@ -577,6 +583,8 @@ async function cmdSetup({ pos, flags }) {
   if (flags.model) cfg.model = flags.model;
   writeJson(CONFIG, cfg, 0o600);
   console.log(`✓ ${PROVIDER} key verified and saved to ${CONFIG}. Quicksilver is ready.`);
+  const envName = PROVIDERS[PROVIDER].env.find((n) => process.env[n]);
+  if (envName) console.error(`note: ${envName} is set and overrides the saved key for ${PROVIDER}`);
 }
 
 async function cmdStatus() {
