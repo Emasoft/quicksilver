@@ -102,6 +102,14 @@ function resolveProvider(flags) {
   // QUICKSILVER_API_BASE is a TypeSafe-proxy override only: an OPENROUTER_API_KEY in env switches provider
   // automatically, so a provider-agnostic override would send the OpenRouter key to a TypeSafe proxy.
   API = ((PROVIDER === 'typesafe' && e.QUICKSILVER_API_BASE) || PROVIDERS[PROVIDER].base).replace(/\/$/, '');
+  // The key rides in the Authorization header, so plain http is allowed only to this machine (audit m2).
+  if (API !== PROVIDERS[PROVIDER].base) {
+    let u;
+    try { u = new URL(API); } catch { die(`QUICKSILVER_API_BASE is not a valid URL: ${API}`); }
+    if (u.protocol !== 'https:' && !(u.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname))) {
+      die(`QUICKSILVER_API_BASE must use https (plain http only for localhost, 127.0.0.1 or [::1]), got ${u.origin}`);
+    }
+  }
 }
 
 function modelName(flags) {
