@@ -217,8 +217,10 @@ a vibe.
   inside a repo can't pull in a file from elsewhere. `--follow-symlinks` (or
   `QUICKSILVER_FOLLOW_SYMLINKS=1`) reads them; the secret guard then also checks
   the link's target.
-- It respects `.gitignore`, skips binaries and files over 2 MB, and refuses
-  stdin or an `--items` file over 2 MB.
+- It respects `.gitignore` and skips binaries. Any input size is read, up to a
+  100 MB hard cap per file, stdin or `--items` file. `--max-bytes N` (or
+  `QUICKSILVER_MAX_BYTES`) sets a lower cap: larger files are then skipped and
+  a larger stdin or `--items` file is refused.
 - Content goes to TypeSafe's API (`api.typesafe.ai`), or through openrouter.ai
   with the openrouter provider, which is chosen automatically whenever
   `OPENROUTER_API_KEY` is set; OpenRouter's own data, logging and billing

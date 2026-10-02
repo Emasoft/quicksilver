@@ -326,18 +326,19 @@ const readCfg = () => JSON.parse(fs.readFileSync(path.join(QHOME, 'config.json')
 const writeCfg = (o) => fs.writeFileSync(path.join(QHOME, 'config.json'), JSON.stringify(o));
 
 describe('m5: stdin and --items reads are bounded', () => {
+  // The default bound is the 100 MB hard cap (tested under --max-bytes); a 2 MB --max-bytes keeps these fast.
   const big = 'x'.repeat(2 * 1024 * 1024 + 1);
 
-  test('stdin over 2 MB exits 1 without a request', async () => {
-    const r = await qs(['filter', 'q?', '-'], { input: big });
+  test('stdin over --max-bytes exits 1 without a request', async () => {
+    const r = await qs(['filter', 'q?', '-', '--max-bytes', String(2 * 1024 * 1024)], { input: big });
     assert.equal(r.code, 1, r.stdout + r.stderr);
     assert.match(r.stderr, /stdin/);
     assert.equal(reqs.length, 0);
   });
 
-  test('--items file over 2 MB exits 1 without a request', async () => {
+  test('--items file over --max-bytes exits 1 without a request', async () => {
     const dir = mkdir({ 'i.txt': big });
-    const r = await qs(['filter', 'q?', '--items', 'i.txt'], { cwd: dir });
+    const r = await qs(['filter', 'q?', '--items', 'i.txt', '--max-bytes', String(2 * 1024 * 1024)], { cwd: dir });
     assert.equal(r.code, 1, r.stdout + r.stderr);
     assert.match(r.stderr, /i\.txt/);
     assert.equal(reqs.length, 0);
@@ -623,5 +624,57 @@ describe('nit: a scanned repo cannot run code through its own git config', () =>
     const r = await qs(['filter', 'q?', '.'], { cwd: repo });
     assert.equal(r.code, 0, r.stderr);
     assert.equal(fs.existsSync(marker), false);
+  });
+});
+
+describe('--max-bytes: the per-input cap is configurable', () => {
+  test('--max-bytes 10 refuses an 11-byte stdin without a request', async () => {
+    const r = await qs(['filter', 'q?', '-', '--max-bytes', '10'], { input: 'x'.repeat(11) });
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /stdin is over 10 bytes/);
+    assert.equal(reqs.length, 0);
+  });
+
+  test('without --max-bytes a stdin over the old 2 MB cap is read', async () => {
+    const r = await qs(['filter', 'q?', '-'], { input: 'x'.repeat(2 * 1024 * 1024 + 1) });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(reqs.length, 1);
+  });
+
+  test('a stdin over the 100 MB hard cap exits 1 without a request', async () => {
+    const r = await qs(['filter', 'q?', '-'], { input: Buffer.alloc(100 * 1024 * 1024 + 1, 120) });
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /stdin is over 100 MB/);
+    assert.equal(reqs.length, 0);
+  });
+
+  test('--max-bytes and QUICKSILVER_MAX_BYTES above the 100 MB hard cap exit 1', async () => {
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const a = await qs(['filter', 'q?', 'a.txt', '--max-bytes', String(100 * 1024 * 1024 + 1)], { cwd: dir });
+    assert.equal(a.code, 1, a.stderr);
+    assert.match(a.stderr, /--max-bytes .*104857600/);
+    const b = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { QUICKSILVER_MAX_BYTES: String(100 * 1024 * 1024 + 1) } });
+    assert.equal(b.code, 1, b.stderr);
+    assert.match(b.stderr, /QUICKSILVER_MAX_BYTES .*104857600/);
+    assert.equal(reqs.length, 0);
+  });
+
+  test('--max-bytes beats QUICKSILVER_MAX_BYTES, and a scanned file over it is skipped', async () => {
+    const dir = mkdir({ 'a.txt': 'small', 'b.txt': 'x'.repeat(50) });
+    const r = await qs(['filter', 'q?', 'a.txt', 'b.txt', '--max-bytes', '20'], { cwd: dir, env: { QUICKSILVER_MAX_BYTES: '1000' } });
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /b\.txt \(binary or over 20 bytes\)/);
+    assert.equal(reqs.length, 1);
+  });
+
+  test('invalid --max-bytes and QUICKSILVER_MAX_BYTES exit 1 naming them', async () => {
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const a = await qs(['filter', 'q?', 'a.txt', '--max-bytes', '0'], { cwd: dir });
+    assert.equal(a.code, 1);
+    assert.match(a.stderr, /--max-bytes/);
+    const b = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { QUICKSILVER_MAX_BYTES: 'lots' } });
+    assert.equal(b.code, 1);
+    assert.match(b.stderr, /QUICKSILVER_MAX_BYTES/);
+    assert.equal(reqs.length, 0);
   });
 });

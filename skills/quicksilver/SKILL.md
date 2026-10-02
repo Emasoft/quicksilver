@@ -88,7 +88,8 @@ globs, `-` for stdin, or `--items FILE.jsonl` (one JSON object per line with
 `id` and `text`, or plain text lines; `-` reads stdin). Add `--lines` to judge
 each line separately (logs, CSVs, lists). Use `--ext ts,tsx` to limit file types.
 Items longer than `--max-chars 60000` are truncated; more than `--limit 5000`
-items is refused, as is stdin or an `--items` file over 2 MB. Symlinks are listed
+items is refused. Any input size is read up to a 100 MB hard cap; `--max-bytes N`
+sets a lower cap (larger files skipped, larger stdin or `--items` refused). Symlinks are listed
 as skipped; add `--follow-symlinks` to read them (the target is still secret-checked).
 
 ```bash

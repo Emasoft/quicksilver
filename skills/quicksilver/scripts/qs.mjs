@@ -27,7 +27,11 @@ const IGNORE_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'out', '.n
 // VPN profiles, GPG files and cloud service-account keys: all were sent before (audit M2).
 const SECRET_RE = /(^|[/\\])(\.env(\..*)?|\.envrc|.*\.(pem|key|p12|pfx|keystore|jks|crt|cer|p8|ppk|kdbx|ovpn|gpg|tfvars|tfstate(\.backup)?)|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|\.npmrc|\.pypirc|\.netrc|\.git-credentials|\.pgpass|\.htpasswd|\.dockercfg|kubeconfig|\.docker[/\\]config\.json|service-account[^/\\]*\.json|credentials(\.json)?|secrets?\.(json|ya?ml|toml))$/i;
 // Per-input byte cap for files, stdin and --items: larger inputs are skipped (scanned files) or refused.
-const MAX_BYTES = 2 * 1024 * 1024;
+// User decision: no default limit, any size is read; --max-bytes / QUICKSILVER_MAX_BYTES is an opt-in lower
+// cap. The fixed 100 MB ceiling only keeps one huge input from hanging the machine and cannot be raised.
+const HARD_MAX_BYTES = 100 * 1024 * 1024;
+let MAX_BYTES = HARD_MAX_BYTES; // set per command by resolveMaxBytes()
+const fmtBytes = (n) => (n % 1048576 === 0 ? `${n / 1048576} MB` : `${n} bytes`);
 const LOCK_RE = /(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|poetry\.lock|composer\.lock|\.min\.(js|css)|\.map)$/i;
 
 // ---------- args ----------
@@ -57,6 +61,7 @@ const die = (msg, code = 1) => { process.stderr.write(`quicksilver: ${msg}\n`); 
 const NUM_FLAGS = {
   concurrency: [1, Infinity, true], limit: [1, Infinity, true], top: [1, Infinity, true], chunk: [1, Infinity, true],
   width: [1, Infinity, true], 'max-chars': [1, Infinity, true], 'pack-items': [1, Infinity, true], 'pack-tokens': [1, Infinity, true],
+  'max-bytes': [1, HARD_MAX_BYTES, true],
   threshold: [0, 1], band: [0, 1], 'min-confidence': [0, 1], 'min-score': [0, 1],
 };
 function checkNums(flags) {
@@ -71,6 +76,15 @@ function checkNums(flags) {
   }
 }
 const num = (v, d) => v ?? d; // v is already a checked number (checkNums) or undefined
+// --max-bytes (already checked) beats QUICKSILVER_MAX_BYTES, which is validated here with the same bounds.
+function resolveMaxBytes(flags) {
+  if (flags['max-bytes'] !== undefined) return flags['max-bytes'];
+  const v = process.env.QUICKSILVER_MAX_BYTES;
+  if (v === undefined || v === '') return HARD_MAX_BYTES;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1 || n > HARD_MAX_BYTES) die(`QUICKSILVER_MAX_BYTES needs a whole number from 1 to ${HARD_MAX_BYTES} (the 100 MB hard cap), got "${v}"`);
+  return n;
+}
 // Malformed user JSON is a usage error (exit 1), not an "unexpected error" stack with exit 5 (audit m4).
 const parseJson = (text, what) => { try { return JSON.parse(text); } catch (e) { return die(`${what} is not valid JSON: ${e.message}`); } };
 const estTokens = (s) => Math.ceil(s.length / 4);
@@ -290,7 +304,7 @@ function readStdin() {
     }
     if (n === 0) break;
     total += n;
-    if (total > MAX_BYTES) die(`stdin is over ${MAX_BYTES / 1048576} MB; pass files instead, or split the input`);
+    if (total > MAX_BYTES) die(`stdin is over ${fmtBytes(MAX_BYTES)}; pass files instead, or split the input`);
     chunks.push(Buffer.from(buf.subarray(0, n)));
   }
   return Buffer.concat(chunks).toString('utf8');
@@ -302,7 +316,7 @@ function readInputFile(file, flags) {
   if (!flags['no-secrets-guard'] && [file, fs.realpathSync(file)].some((p) => SECRET_RE.test(p))) {
     die(`${file} looks like a secret file and is never sent (--no-secrets-guard overrides)`);
   }
-  if (fs.statSync(file).size > MAX_BYTES) die(`${file} is over ${MAX_BYTES / 1048576} MB; split it`);
+  if (fs.statSync(file).size > MAX_BYTES) die(`${file} is over ${fmtBytes(MAX_BYTES)}; split it`);
   return fs.readFileSync(file, 'utf8');
 }
 
@@ -361,7 +375,7 @@ function collect(pos, flags) {
     if (!flags['no-secrets-guard'] && (SECRET_RE.test(r) || (real !== abs && SECRET_RE.test(real)))) { skipped.push(`${r} (secret-like, never sent)`); continue; }
     if (LOCK_RE.test(r)) continue;
     const text = readText(abs, MAX_BYTES);
-    if (text === null) { skipped.push(`${r} (binary or >2MB)`); continue; }
+    if (text === null) { skipped.push(`${r} (binary or over ${fmtBytes(MAX_BYTES)})`); continue; }
     if (!text.trim()) continue;
     flags.lines ? pushLines(r, text) : push(r, text);
   }
@@ -755,14 +769,18 @@ INPUTS  files, directories (.gitignore respected), globs (Node 22+), - (stdin),
         --items FILE.jsonl|- (one {"id","text"} object or plain line each).
         Secret-like files (.env*, .envrc, keys, certs, credentials, kubeconfig,
         terraform vars/state, ...) are never sent, even when named explicitly.
-        Symlinks are skipped unless --follow-symlinks. Binary or >2 MB files
-        are skipped; stdin or an --items file over 2 MB is refused.
+        Symlinks are skipped unless --follow-symlinks. Binary files are
+        skipped. Any size is read up to a 100 MB hard cap per input; with
+        --max-bytes N a larger file is skipped and a larger stdin or --items
+        file is refused.
 
 OPTIONS
  input    --lines             each non-empty line is an item (logs, lists)
           --ext ts,tsx        only these file extensions
           --max-chars 60000   truncate each item (marked ~ in the output)
           --limit 5000        refuse to run on more items than this
+          --max-bytes N       per-file/stdin/--items size cap (opt-in; at
+                              most 104857600, the 100 MB hard cap)
           --no-secrets-guard  also send secret-looking files
           --follow-symlinks   read symlink targets (default: skip and list them);
                               the secret guard also checks the target's path
@@ -796,6 +814,7 @@ ENVIRONMENT
   QUICKSILVER_API_BASE  typesafe-only API base URL (proxies)
   QUICKSILVER_HOME      config + stats directory (default ~/.quicksilver)
   QUICKSILVER_FOLLOW_SYMLINKS=1  same as --follow-symlinks
+  QUICKSILVER_MAX_BYTES  same as --max-bytes (the flag wins)
 
 EXIT CODES  0 ok · 1 usage/input error · 3 key missing, rejected or out of
             credits (re-run setup) · 4 request rejected · 5 request failed
@@ -821,7 +840,7 @@ USE CASES
 
 // Every command validates its numeric flags and resolves the provider first, from its parsed flags.
 const COMMANDS = Object.fromEntries(Object.entries({ setup: cmdSetup, status: cmdStatus, filter: cmdFilter, classify: cmdClassify, rank: cmdRank, find: cmdFind, ask: cmdAsk })
-  .map(([name, fn]) => [name, (args) => { checkNums(args.flags); resolveProvider(args.flags); return fn(args); }]));
+  .map(([name, fn]) => [name, (args) => { checkNums(args.flags); MAX_BYTES = resolveMaxBytes(args.flags); resolveProvider(args.flags); return fn(args); }]));
 
 process.on('unhandledRejection', (e) => die(`unexpected error: ${e?.stack || e}`, 5));
 process.on('uncaughtException', (e) => die(`unexpected error: ${e?.stack || e}`, 5));
