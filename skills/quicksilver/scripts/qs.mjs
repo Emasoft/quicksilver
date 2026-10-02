@@ -440,7 +440,7 @@ const ADAPTERS = {
 };
 
 // Totals of the whole run, across providers, for the footer and stats.json.
-const RUN = { requests: 0, jevTokens: 0, cost: 0, costUnknown: false, used: {}, fallbacks: {}, lastError: null };
+const RUN = { requests: 0, jevTokens: 0, cost: 0, costUnknown: false, used: {}, fallbacks: {}, failures: [] };
 const DEAD = new Set(); // providers that failed in this run: skipped by every later request
 const FIRST = new Map(); // provider name -> promise settled once the run's first request to it has an outcome
 const REASONS = { 'key-rejected': 'key rejected', 'no-credits': 'out of credits', 'model-unavailable': 'model unavailable',
@@ -474,7 +474,7 @@ async function jev(state, questions, specModel) {
       logError(p, model, e, stop ? 'no' : next?.name ?? 'none-left');
       if (stop) die(e.message, e.exit);
       DEAD.add(p.name);
-      RUN.lastError = e;
+      RUN.failures.push(e);
       if (next) {
         const k = `${p.name} → ${next.name} (${REASONS[e.kind]}${e.status ? `, HTTP ${e.status}` : ''})`;
         RUN.fallbacks[k] = (RUN.fallbacks[k] || 0) + 1;
@@ -491,8 +491,13 @@ async function jev(state, questions, specModel) {
     RUN.used[used] = (RUN.used[used] || 0) + 1;
     return r;
   }
-  const e = RUN.lastError;
-  return die(CHAIN.length > 1 ? `every provider failed; the last one: ${withHint(e)} (all of them in ${ERRORS_LOG})` : withHint(e), e.exit);
+  const fails = RUN.failures, e = fails.at(-1);
+  if (CHAIN.length === 1) return die(withHint(e), e.exit);
+  // Every provider's failure is listed (the last one alone hid a rejected key behind, say, a 404). Exit 3 when any
+  // of them was a key or credit problem: that is the one the user can fix (SKILL.md exit-code contract); else the
+  // last failure's code (5 network/5xx, 4 model).
+  const exit = fails.some((f) => f.exit === 3) ? 3 : e.exit;
+  return die(`every provider failed (all of them in ${ERRORS_LOG}):\n${fails.map((f) => `  ${withHint(f)}`).join('\n')}`, exit);
 }
 
 // ISO 8601 local time with its offset, e.g. 2026-10-02T08:30:00+02:00 (Date.parse reads it back).

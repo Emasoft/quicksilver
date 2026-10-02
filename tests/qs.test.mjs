@@ -1227,8 +1227,20 @@ describe('fallback: a failing provider hands the request to the next one', () =>
     const dir = mkdir({ 'a.txt': 'hello-a' });
     const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { MOCK2_KEY: 'k2' } });
     assert.equal(r.code, 3, r.stderr);
-    assert.match(r.stderr, /every provider failed.*typesafe: out of credits/);
+    assert.match(r.stderr, /every provider failed.*typesafe: out of credits/s);
     assert.equal(logLines().length, 2);
+  });
+
+  test('when every provider fails, stderr lists each failure and a key failure means exit 3', async () => {
+    chain();
+    failFor['Bearer k2'] = [401];
+    failFor[`Bearer ${KEY}`] = [404];
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { MOCK2_KEY: 'k2' } });
+    assert.equal(r.code, 3, r.stderr);
+    assert.match(r.stderr, /every provider failed/);
+    assert.match(r.stderr, /mock2 rejected the API key \(401\)/);
+    assert.match(r.stderr, /typesafe cannot serve model/);
   });
 
   test('entries older than 72 hours are dropped when the log is written', async () => {
