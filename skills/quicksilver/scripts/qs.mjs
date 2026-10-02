@@ -7,6 +7,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 
+import { pathToFileURL } from 'node:url';
+
 const VERSION = '0.3.0'; // keep equal to package.json (a test checks); written into errors.log
 // The config home. Provider settings and keys are read only from here, never from the working directory.
 const HOME = process.env.QUICKSILVER_HOME || path.join(os.homedir(), '.quicksilver');
@@ -34,22 +36,42 @@ const fmtBytes = (n) => (n % 1048576 === 0 ? `${n / 1048576} MB` : `${n} bytes`)
 // the 90k ceiling stays under the context even at ~3 chars per token (dense code or JSON).
 const CHUNK_CHARS_MAX = 90000;
 const CHUNK_OVERLAP = 500; // repeated at each boundary, so a match that straddles it is whole in one chunk
-let CHUNK_CHARS = 60000; // set per command from --chunk-chars / QUICKSILVER_CHUNK_CHARS
+// Option defaults and the other limits HELP states. They are the single source for the code and for HELP, and
+// so for the SKILL.md reference generated from HELP: a default changed here changes everywhere it is printed.
+const DEFAULTS = { 'chunk-chars': 60000, limit: 5000, width: 160, threshold: 0.5, band: 0.15, 'min-confidence': 0.6,
+  'min-score': 0.05, chunk: 150, concurrency: 16, 'pack-items': 1, 'pack-tokens': 3000 };
+const FAST_PACK_ITEMS = 40; // --pack-items under --fast
+const RANK_TOP = 10, FIND_TOP = 5; // --top of rank and of find
+const FIND_CHUNK_MAX = 250; // the largest --chunk: lines per find request
+const LOG_KEEP_HOURS = 72; // errors.log drops older entries
+let CHUNK_CHARS = DEFAULTS['chunk-chars']; // set per command from --chunk-chars / QUICKSILVER_CHUNK_CHARS
 const LOCK_RE = /(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|poetry\.lock|composer\.lock|\.min\.(js|css)|\.map)$/i;
 
 // ---------- args ----------
 
+// Every option the CLI accepts: true takes a value, false is a switch. The single source for parseArgs and for
+// the docs tests (HELP must list exactly these, and README.md and SKILL.md may name no other). An unknown --name
+// is refused: ignoring it let a stale or mistyped flag (the removed --max-chars, say) run on defaults silently.
+const OPTIONS = {
+  lines: false, ext: true, 'chunk-chars': true, limit: true, 'max-bytes': true, items: true, 'no-secrets-guard': false,
+  'follow-symlinks': false, json: false, save: true, top: true, all: false, verbose: false, 'no-collapse': false,
+  width: true, threshold: true, band: true, labels: true, 'labels-json': true, default: true, question: true,
+  'min-confidence': true, only: true, 'min-score': true, chunk: true, state: true, choice: true, score: true,
+  concurrency: true, fast: false, 'pack-items': true, 'pack-tokens': true, provider: true, model: true,
+  remove: false, help: false,
+};
+
 function parseArgs(argv) {
   const pos = [], flags = {};
-  const bools = new Set(['lines', 'json', 'all', 'remove', 'help', 'fast', 'verbose', 'no-collapse', 'no-secrets-guard', 'follow-symlinks']);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--') { pos.push(...argv.slice(i + 1)); break; }
     if (a.startsWith('--')) {
       const eq = a.indexOf('=');
-      if (eq > 0) { flags[a.slice(2, eq)] = a.slice(eq + 1); continue; }
-      const name = a.slice(2);
-      if (bools.has(name) || i + 1 >= argv.length || argv[i + 1].startsWith('--')) flags[name] = true;
+      const name = eq > 0 ? a.slice(2, eq) : a.slice(2);
+      if (!Object.hasOwn(OPTIONS, name)) die(`unknown option --${name} (the options are listed by: node qs.mjs help)`);
+      if (eq > 0) flags[name] = a.slice(eq + 1);
+      else if (!OPTIONS[name] || i + 1 >= argv.length || argv[i + 1].startsWith('--')) flags[name] = true;
       else flags[name] = argv[++i];
     } else if (a === '-h') flags.help = true;
     else pos.push(a);
@@ -57,12 +79,20 @@ function parseArgs(argv) {
   return { pos, flags };
 }
 
-const die = (msg, code = 1) => { process.stderr.write(`quicksilver: ${msg}\n`); process.exit(code); };
+// Exit codes: the single source for every exit in this file and for HELP's EXIT CODES line (the SKILL.md contract).
+// A docs test refuses a bare numeric exit code anywhere else.
+const EXIT = { OK: 0, USAGE: 1, KEY: 3, REJECTED: 4, FAILED: 5, INTERRUPTED: 130 };
+const EXIT_MEANING = {
+  [EXIT.OK]: 'ok', [EXIT.USAGE]: 'usage, input or config error',
+  [EXIT.KEY]: 'key missing, rejected or out of credits (re-run setup)', [EXIT.REJECTED]: 'request or model rejected',
+  [EXIT.FAILED]: 'request failed after retries, or an unexpected error', [EXIT.INTERRUPTED]: 'setup prompt interrupted',
+};
+const die = (msg, code = EXIT.USAGE) => { process.stderr.write(`quicksilver: ${msg}\n`); process.exit(code); };
 // Numeric flags are validated once, before any work, by checkNums(): unchecked, NaN or 0 silently broke
 // runs (--concurrency 0 started no workers and printed "(no matches)", --limit abc disabled the cap).
 // [min, max, integer]
 const NUM_FLAGS = {
-  concurrency: [1, Infinity, true], limit: [1, Infinity, true], top: [1, Infinity, true], chunk: [1, Infinity, true],
+  concurrency: [1, Infinity, true], limit: [1, Infinity, true], top: [1, Infinity, true], chunk: [1, FIND_CHUNK_MAX, true],
   width: [1, Infinity, true], 'chunk-chars': [1000, CHUNK_CHARS_MAX, true], 'pack-items': [1, Infinity, true], 'pack-tokens': [1, Infinity, true],
   'max-bytes': [1, HARD_MAX_BYTES, true],
   threshold: [0, 1], band: [0, 1], 'min-confidence': [0, 1], 'min-score': [0, 1],
@@ -192,7 +222,8 @@ function parseEnabled(v, where) {
   const w = typeof v === 'string' ? v.trim().toLowerCase() : null;
   if (TRUE_WORDS.has(w)) return true;
   if (FALSE_WORDS.has(w)) return false;
-  return die(`${where}: "enabled" must be true/false (or yes/no, on/off, 1/0, enabled/disabled, active/inactive), got ${JSON.stringify(v)}`);
+  // the accepted words come from the sets, so this message and HELP cannot list a different set
+  return die(`${where}: "enabled" must be a JSON boolean, 1, 0 or one of ${[...TRUE_WORDS, ...FALSE_WORDS].join(', ')} (case-insensitive), got ${JSON.stringify(v)}`);
 }
 
 // One merged entry (built-in fields overridden by the file's) -> the validated provider. Every problem exits 1
@@ -359,13 +390,13 @@ function requireReady() {
   if (PINNED) {
     const p = CHAIN[0];
     if (p.state === 'no-url') die(`provider "${p.name}" has no "base_url"; set it in ${PROVIDERS_FILE}`);
-    if (p.state === 'no-key') die(`no ${p.name} API key: ${p.tried.join(', ') || 'no api_key'} ${p.tried.length > 1 ? 'are' : 'is'} unset or empty${p.key_url ? `. Get one at ${p.key_url}` : ''}, then export it or run: node qs.mjs setup --provider ${p.name}`, 3);
-    if (p.state === 'no-account') die(`no ${p.name} account id: ${p.acctTried.join(', ')} unset or empty`, 3);
+    if (p.state === 'no-key') die(`no ${p.name} API key: ${p.tried.join(', ') || 'no api_key'} ${p.tried.length > 1 ? 'are' : 'is'} unset or empty${p.key_url ? `. Get one at ${p.key_url}` : ''}, then export it or run: node qs.mjs setup --provider ${p.name}`, EXIT.KEY);
+    if (p.state === 'no-account') die(`no ${p.name} account id: ${p.acctTried.join(', ')} unset or empty`, EXIT.KEY);
     return;
   }
   if (CHAIN.length) return;
   const wants = ALL.filter((p) => p.enabled && p.base_url).map((p) => `${p.name} (${(p.state === 'no-account' ? p.acctTried : p.tried).join(' or ')})`);
-  die(`no provider is ready: export a key for one of ${wants.join(', ')}, or run: node qs.mjs setup --provider NAME`, 3);
+  die(`no provider is ready: export a key for one of ${wants.join(', ')}, or run: node qs.mjs setup --provider NAME`, EXIT.KEY);
 }
 
 // A model id belongs to one provider (OpenRouter ids are "vendor/model", TypeSafe ids have no "/"). --model,
@@ -493,10 +524,10 @@ async function jev(state, questions, specModel) {
   }
   const fails = RUN.failures, e = fails.at(-1);
   if (CHAIN.length === 1) return die(withHint(e), e.exit);
-  // Every provider's failure is listed (the last one alone hid a rejected key behind, say, a 404). Exit 3 when any
+  // Every provider's failure is listed (the last one alone hid a rejected key behind, say, a 404). Exit KEY when any
   // of them was a key or credit problem: that is the one the user can fix (SKILL.md exit-code contract); else the
-  // last failure's code (5 network/5xx, 4 model).
-  const exit = fails.some((f) => f.exit === 3) ? 3 : e.exit;
+  // last failure's code (FAILED network/5xx, REJECTED model).
+  const exit = fails.some((f) => f.exit === EXIT.KEY) ? EXIT.KEY : e.exit;
   return die(`every provider failed (all of them in ${ERRORS_LOG}):\n${fails.map((f) => `  ${withHint(f)}`).join('\n')}`, exit);
 }
 
@@ -516,7 +547,7 @@ let logWarned = false;
 function logError(p, model, e, fallback) {
   const line = `${isoNow()} quicksilver/${VERSION} provider=${p.name} model=${model} kind=${e.kind} status=${e.status || '-'} fallback=${fallback} msg=${JSON.stringify(redact(e.message, p))}${e.hint ? ` hint=${JSON.stringify(e.hint)}` : ''}\n`;
   try {
-    const cutoff = Date.now() - 72 * 3600e3;
+    const cutoff = Date.now() - LOG_KEEP_HOURS * 3600e3;
     let old = '';
     try { old = fs.readFileSync(ERRORS_LOG, 'utf8'); } catch (err) { if (err.code !== 'ENOENT') throw err; }
     const kept = old.split('\n').filter((l) => Date.parse(l.slice(0, l.indexOf(' '))) >= cutoff);
@@ -548,29 +579,29 @@ async function callProvider(p, model, state, questions, { retries = 5 } = {}) {
       });
       text = await res.text();
     } catch (e) {
-      last = fail('network', 0, `${p.name} request failed: network error: ${redact(e.cause?.message || e.message, p)}`, 5);
+      last = fail('network', 0, `${p.name} request failed: network error: ${redact(e.cause?.message || e.message, p)}`, EXIT.FAILED);
       await sleep(500 * 2 ** attempt);
       continue;
     }
     const s = res.status;
     if (res.ok) return decodeReply(p, adapter, text, questions);
-    // exit 3 = account/key problem the user must fix (SKILL.md contract)
-    if (s === 402 || /insufficient (credits|balance|funds)/i.test(text)) throw fail('no-credits', s, outOfCredits(p, s), 3);
+    // EXIT.KEY = account/key problem the user must fix (SKILL.md contract)
+    if (s === 402 || /insufficient (credits|balance|funds)/i.test(text)) throw fail('no-credits', s, outOfCredits(p, s), EXIT.KEY);
     if (s === 401 || s === 403) {
       // A key written literally in providers.json is fixed there; setup only fits a key the user has not placed by
       // hand (and would silently replace the one in the file).
       const hint = p.keySource === 'literal in providers.json' ? `Fix api_key for ${p.name} in ${PROVIDERS_FILE}`
         : `${p.key_url ? `Get a new one at ${p.key_url}, then run` : 'Run'}: node qs.mjs setup --provider ${p.name}`;
-      throw fail('key-rejected', s, `${p.name} rejected the API key (${s})`, 3, hint);
+      throw fail('key-rejected', s, `${p.name} rejected the API key (${s})`, EXIT.KEY, hint);
     }
     // ponytail: providers word "no such model" differently; a 400/422 naming the model as not found or
     // unavailable is read as model-unavailable (falls back) rather than a bad request. Extend the words as seen.
     if (s === 404 || ((s === 400 || s === 422) && /model/i.test(text) && /not found|not available|unavailable|unknown|not supported|not a valid|no endpoints|does not exist/i.test(text))) {
-      throw fail('model-unavailable', s, `${p.name} cannot serve model "${model}" (${s}): ${redact(clip(text, 300), p)}`, 4);
+      throw fail('model-unavailable', s, `${p.name} cannot serve model "${model}" (${s}): ${redact(clip(text, 300), p)}`, EXIT.REJECTED);
     }
-    if (s === 400 || s === 422) throw fail('request-rejected', s, `${p.name} rejected the request (${s}): ${redact(clip(text, 800), p)}`, 4);
-    if (!(s === 408 || s === 409 || s === 429 || s >= 500)) throw fail('request-rejected', s, `${p.name} rejected the request (${s}): ${redact(clip(text, 300), p)}`, 4);
-    last = fail(s === 429 ? 'rate-limited' : 'server-error', s, `${p.name} request failed: HTTP ${s}: ${redact(clip(text, 300), p)}`, 5);
+    if (s === 400 || s === 422) throw fail('request-rejected', s, `${p.name} rejected the request (${s}): ${redact(clip(text, 800), p)}`, EXIT.REJECTED);
+    if (!(s === 408 || s === 409 || s === 429 || s >= 500)) throw fail('request-rejected', s, `${p.name} rejected the request (${s}): ${redact(clip(text, 300), p)}`, EXIT.REJECTED);
+    last = fail(s === 429 ? 'rate-limited' : 'server-error', s, `${p.name} request failed: HTTP ${s}: ${redact(clip(text, 300), p)}`, EXIT.FAILED);
     const ra = Number(res.headers.get('retry-after'));
     await sleep(ra > 0 ? ra * 1000 : 500 * 2 ** attempt + Math.random() * 250);
   }
@@ -581,10 +612,10 @@ async function callProvider(p, model, state, questions, { retries = 5 } = {}) {
 function decodeReply(p, adapter, text, questions) {
   let payload;
   try { payload = adapter.decode(JSON.parse(text)); } catch (e) {
-    throw fail('bad-response', 200, `${p.name} sent an unusable reply: ${e instanceof SyntaxError ? 'not JSON' : redact(e.message, p)}`, 5);
+    throw fail('bad-response', 200, `${p.name} sent an unusable reply: ${e instanceof SyntaxError ? 'not JSON' : redact(e.message, p)}`, EXIT.FAILED);
   }
   const answers = payload?.answers;
-  if (!isObj(answers) || Object.keys(questions).some((id) => !isObj(answers[id]))) throw fail('bad-response', 200, `${p.name} sent a reply without an answer for every question`, 5);
+  if (!isObj(answers) || Object.keys(questions).some((id) => !isObj(answers[id]))) throw fail('bad-response', 200, `${p.name} sent a reply without an answer for every question`, EXIT.FAILED);
   const input = Number(payload.usage?.input_tokens) || 0;
   const reported = p.cost_field ? getPath(payload, p.cost_field) : undefined;
   const cost = typeof reported === 'number' ? reported : p.usd_per_mtok != null ? (input * p.usd_per_mtok) / 1e6 : null;
@@ -697,7 +728,7 @@ function readInputFile(file, flags) {
 function collect(pos, flags) {
   const exts = flags.ext ? String(flags.ext).split(',').map((e) => '.' + e.replace(/^\./, '').toLowerCase()) : null;
   const items = [], skipped = [];
-  const limit = num(flags.limit, 5000);
+  const limit = num(flags.limit, DEFAULTS.limit);
   const push = (id, text) => {
     // Checked per item, so a run over --limit stops before reading the rest of the input (audit m5).
     if (items.length >= limit) die(`more than ${limit} items (--limit ${limit}). Narrow the input or raise --limit.`);
@@ -756,7 +787,7 @@ function collect(pos, flags) {
 // One item per request by default: packing items into a shared state measurably hurts accuracy
 // (bench: CI triage 76% packed vs 100% unpacked). --fast packs small items for throughput.
 function batches(items, flags) {
-  const budget = num(flags['pack-tokens'], 3000), maxN = num(flags['pack-items'], flags.fast ? 40 : 1);
+  const budget = num(flags['pack-tokens'], DEFAULTS['pack-tokens']), maxN = num(flags['pack-items'], flags.fast ? FAST_PACK_ITEMS : DEFAULTS['pack-items']);
   const out = [];
   let cur = [], tok = 0;
   for (const it of items) {
@@ -836,7 +867,7 @@ async function runPerItem(items, flags, makeQ, dflt) {
     const questions = Object.fromEntries(g.map((_, j) => [`q${j}`, makeQ(packed ? `\`items.i${j}\`` : '`content`', packed)]));
     const res = await jev(state, questions);
     return g.map((u, j) => ({ u, answer: res.answers[`q${j}`] }));
-  }), num(flags.concurrency, 16));
+  }), num(flags.concurrency, DEFAULTS.concurrency));
   const parts = new Map(); // item -> its chunk answers, in chunk order (pool keeps the order of groups)
   for (const { u, answer } of answered.flat()) {
     if (!parts.has(u.item)) parts.set(u.item, []);
@@ -876,7 +907,7 @@ const chunkJson = (r) => ({ chunks: r.item.chunks, ...(r.answer.best_lines ? { b
 
 function label(r, flags) {
   const it = r.item;
-  return flags.lines || flags.items ? `${it.id}${chunkNote(r)}  ${clip(it.text.trim().replace(/\s+/g, ' '), num(flags.width, 160))}` : `${it.id}${chunkNote(r)}`;
+  return flags.lines || flags.items ? `${it.id}${chunkNote(r)}  ${clip(it.text.trim().replace(/\s+/g, ' '), num(flags.width, DEFAULTS.width))}` : `${it.id}${chunkNote(r)}`;
 }
 
 // When every input was skipped, say which and why (the same list the footer prints), not just "pass files".
@@ -932,7 +963,7 @@ async function cmdFilter({ pos, flags }) {
   const t0 = Date.now();
   const { items, skipped } = collect(pos, flags);
   requireInputs(items, 'filter', skipped);
-  const thr = num(flags.threshold, 0.5), band = num(flags.band, 0.15);
+  const thr = num(flags.threshold, DEFAULTS.threshold), band = num(flags.band, DEFAULTS.band);
   const rows = await runPerItem(items, flags, (ref, packed) => ({
     type: 'noul',
     instructions: packed ? { question, answer_about: `Answer only about ${ref}; ignore the other items.` } : question,
@@ -973,7 +1004,7 @@ async function cmdClassify({ pos, flags }) {
   const t0 = Date.now();
   const { items, skipped } = collect(pos, flags);
   requireInputs(items, 'classify', skipped);
-  const minConf = num(flags['min-confidence'], 0.6);
+  const minConf = num(flags['min-confidence'], DEFAULTS['min-confidence']);
   const rows = await runPerItem(items, flags, (ref, packed) => ({
     type: 'choice',
     instructions: packed ? { question, answer_about: `Answer only about ${ref}; ignore the other items.` } : question,
@@ -1004,7 +1035,7 @@ async function cmdClassify({ pos, flags }) {
     lines.push('? low confidence — check these yourself:');
     for (const r of low.filter((r) => !only || only.has(r.answer.choice))) {
       const [second] = Object.entries(r.answer.probabilities).sort((a, b) => b[1] - a[1]).slice(1);
-      lines.push(`?${f2(r.answer.confidence)}  ${r.answer.choice} (or ${second?.[0]})  ${r.item.id}  ${clip(r.item.text.trim().replace(/\s+/g, ' '), num(flags.width, 160))}`);
+      lines.push(`?${f2(r.answer.confidence)}  ${r.answer.choice} (or ${second?.[0]})  ${r.item.id}  ${clip(r.item.text.trim().replace(/\s+/g, ' '), num(flags.width, DEFAULTS.width))}`);
     }
   }
   const saved = save(flags, rows.map((r) => ({ id: r.item.id, label: r.answer.choice, confidence: r.answer.confidence, ...chunkJson(r) })));
@@ -1022,7 +1053,7 @@ const RANK_LEVELS = [
 
 async function cmdRank({ pos, flags }) {
   const query = pos.shift();
-  if (!query) die('usage: rank "<query>" <paths...> [--top 10]');
+  if (!query) die(`usage: rank "<query>" <paths...> [--top ${RANK_TOP}]`);
   const t0 = Date.now();
   const { items, skipped } = collect(pos, flags);
   requireInputs(items, 'rank', skipped);
@@ -1031,7 +1062,7 @@ async function cmdRank({ pos, flags }) {
     instructions: { query, question: `How relevant is ${ref} to \`query\`?${packed ? ' Ignore the other items.' : ''}` },
     criteria: RANK_LEVELS,
   }));
-  const top = num(flags.top, 10), max = RANK_LEVELS.length - 1;
+  const top = num(flags.top, RANK_TOP), max = RANK_LEVELS.length - 1;
   rows.sort((a, b) => b.answer.score - a.answer.score);
   const shown = flags.all ? rows : rows.slice(0, top);
   const lines = shown.map((r) => `${f2(r.answer.score / max)}  ${label(r, flags)}`);
@@ -1041,9 +1072,10 @@ async function cmdRank({ pos, flags }) {
 
 async function cmdFind({ pos, flags }) {
   const query = pos.shift();
-  if (!query || !pos.length) die('usage: find "<what you are looking for>" <files...> [--top 5]');
+  if (!query || !pos.length) die(`usage: find "<what you are looking for>" <files...> [--top ${FIND_TOP}]`);
   const t0 = Date.now();
-  const chunkLines = Math.min(num(flags.chunk, 150), 250);
+  // --chunk is range-checked by checkNums (at most FIND_CHUNK_MAX): a larger value used to be cut to 250 silently.
+  const chunkLines = num(flags.chunk, DEFAULTS.chunk);
   const { items: files, skipped } = collect(pos, { ...flags, lines: false });
   requireInputs(files, 'find', skipped);
   const chunks = [];
@@ -1077,12 +1109,12 @@ async function cmdFind({ pos, flags }) {
     return Object.entries(res.answers.where.probabilities)
       .filter(([n]) => n !== 'none')
       .map(([n, p]) => ({ file: c.file, line: n.split('.')[0], text: lines[n], score: p * ex }));
-  }), num(flags.concurrency, 16));
-  const top = num(flags.top, 5), minScore = num(flags['min-score'], 0.05);
+  }), num(flags.concurrency, DEFAULTS.concurrency));
+  const top = num(flags.top, FIND_TOP), minScore = num(flags['min-score'], DEFAULTS['min-score']);
   const seen = new Set(); // pieces of one split line, and overlapping pieces, report that line once (best first)
   const hits = perChunk.flat().filter((h) => h.score >= minScore).sort((a, b) => b.score - a.score)
     .filter((h) => !seen.has(`${h.file}:${h.line}`) && seen.add(`${h.file}:${h.line}`)).slice(0, top);
-  const out = hits.map((h) => `${f2(h.score)}  ${h.file}:${h.line}  ${clip(h.text.trim(), num(flags.width, 160))}`);
+  const out = hits.map((h) => `${f2(h.score)}  ${h.file}:${h.line}  ${clip(h.text.trim(), num(flags.width, DEFAULTS.width))}`);
   if (!out.length) out.push('(no matching lines)');
   const foot = footer(t0, files, [`${chunks.length} chunks`], out.join('\n'), skipped);
   emit(flags, hits, out, foot);
@@ -1129,7 +1161,7 @@ async function cmdAsk({ pos, flags }) {
   const dflts = Object.fromEntries(Object.entries(body.questions).map(([id, q]) => [id, q?.type === 'choice' ? defaultLabel(q.criteria, flags) : undefined]));
   if (body.model !== undefined && (typeof body.model !== 'string' || !MODEL_RE.test(body.model))) die(`the ask spec's "model" must be a model id (${MODEL_RE.source})`);
   const states = chunkState(body.state);
-  const replies = await pool(states.map((s) => () => jev(s.state, body.questions, body.model)), num(flags.concurrency, 16));
+  const replies = await pool(states.map((s) => () => jev(s.state, body.questions, body.model)), num(flags.concurrency, DEFAULTS.concurrency));
   const answers = Object.fromEntries(Object.keys(body.questions).map((id) => [id, mergeChunks(replies.map((res, i) => ({ ...states[i], answer: res.answers[id] })), dflts[id])]));
   const usage = { input_tokens: replies.reduce((a, res) => a + (res.usage?.input_tokens || 0), 0) };
   const lines = Object.entries(answers).map(([id, a]) => fmtAnswer(id, a));
@@ -1174,7 +1206,7 @@ async function promptHidden(q) {
           process.stdin.setRawMode(false); process.stdin.pause(); process.stdin.off('data', onData);
           process.stderr.write('\n'); return resolve(s.trim());
         }
-        if (c === '\u0003') { process.stderr.write('\n'); process.exit(130); }
+        if (c === '\u0003') { process.stderr.write('\n'); process.exit(EXIT.INTERRUPTED); }
         if (c === '\u007f' || c === '\b') { if (s.length) { s = s.slice(0, -1); process.stderr.write('\b \b'); } continue; }
         s += c; process.stderr.write('*');
       }
@@ -1216,10 +1248,10 @@ async function cmdSetup({ pos, flags }) {
   if (p.verify) {
     const s = await verifyKey(p, key);
     if (s === 0) die(`network error: could not reach ${p.name} to verify the key`);
-    if (s === 401 || s === 403) die(`that key was rejected by ${p.name} (${s}). Double-check it${p.key_url ? ` at ${p.key_url}` : ''}; for another provider's key add --provider NAME`, 3);
-    // Every provider-side refusal is exit 3 (key or account problem, re-run setup), as for normal commands.
-    if (s === 402) die(outOfCredits(p, s), 3);
-    if (s < 200 || s >= 300) die(`could not verify the key: ${p.name} answered HTTP ${s}`, 3);
+    if (s === 401 || s === 403) die(`that key was rejected by ${p.name} (${s}). Double-check it${p.key_url ? ` at ${p.key_url}` : ''}; for another provider's key add --provider NAME`, EXIT.KEY);
+    // Every provider-side refusal is EXIT.KEY (key or account problem, re-run setup), as for normal commands.
+    if (s === 402) die(outOfCredits(p, s), EXIT.KEY);
+    if (s < 200 || s >= 300) die(`could not verify the key: ${p.name} answered HTTP ${s}`, EXIT.KEY);
   }
   writeJson(PROVIDERS_FILE, doc);
   console.log(`✓ ${p.name} key ${p.verify ? 'verified and ' : ''}saved to ${PROVIDERS_FILE}. Quicksilver is ready.`);
@@ -1248,8 +1280,33 @@ async function cmdStatus() {
   for (const [i, r] of rows.entries()) console.log(`${i + 1}. ${r.p.name.padEnd(w)}  ${r.text}`);
   const s = readJson(STATS, null);
   if (s) console.log(`since ${s.since.slice(0, 10)}: ${s.runs} runs · ${fmtK(s.items)} items judged · jev ${fmtK(s.jev_input_tokens)} tok ($${(s.jev_cost_usd ?? s.jev_input_tokens * PRICE_PER_TOKEN).toFixed(4)}) · ~${fmtK(s.claude_tokens_saved)} Claude tokens not read`);
-  if (!rows.some((r) => r.ok)) process.exit(3);
+  if (!rows.some((r) => r.ok)) process.exit(EXIT.KEY);
 }
+
+// HELP is built from the constants the code runs on (OPTIONS' defaults, BUILTINS, ADAPTERS, FIELDS, the "enabled"
+// words, EXIT, the limits), so it cannot state a value the code does not use; tests/docs.test.mjs checks the rest
+// (every option and environment variable, both ways) and that SKILL.md embeds exactly this text.
+
+// Fills `text` (words, or an array of unbreakable pieces) after `lead`, continuing at column `indent`, so a line
+// built from the constants never runs past 79 columns.
+function wrap(lead, text, indent = lead.length, width = 79) {
+  const lines = [lead];
+  for (const w of Array.isArray(text) ? text : text.split(/\s+/).filter(Boolean)) {
+    const i = lines.length - 1, empty = lines[i].length === (i ? indent : lead.length);
+    if (!empty && lines[i].length + 1 + w.length > width) lines.push(' '.repeat(indent) + w);
+    else lines[i] += (empty ? '' : ' ') + w;
+  }
+  return lines.join('\n');
+}
+const varNames = (cred) => credList(cred).map((s) => VAR_RE.exec(s)).filter(Boolean).map((m) => m[1] || m[2]);
+// One ENVIRONMENT row: names, then the description at column 27 (on the next line when the names are too long).
+const envRow = (names, desc) => {
+  const body = wrap(' '.repeat(27), desc);
+  return names.length <= 23 ? `  ${names.padEnd(25)}${body.slice(27)}` : `  ${names}\n${body}`;
+};
+// One OPTIONS row: group, flag (with its default), description at column 30.
+const optRow = (group, flag, desc) => wrap(` ${group.padEnd(9)}${flag.length < 20 ? flag.padEnd(20) : `${flag}  `}`, desc, 30);
+const [CC_MIN, CC_MAX] = NUM_FLAGS['chunk-chars'];
 
 const HELP = `quicksilver: hand bulk yes/no, label, rank and find calls to Jev
 
@@ -1268,104 +1325,94 @@ COMMANDS
                                         state, plus lifetime savings
   help, --help, -h                      this screen
 
-INPUTS  files, directories (.gitignore respected), globs (Node 22+), - (stdin),
-        --items FILE.jsonl|- (one {"id","text"} object or plain line each).
-        Secret-like files (.env*, .envrc, keys, certs, credentials, kubeconfig,
-        terraform vars/state, ...) are never sent, even when named explicitly.
-        Symlinks are skipped unless --follow-symlinks. Binary files are
-        skipped. Any size is read up to a 100 MB hard cap per input; with
-        --max-bytes N a larger file is skipped and a larger stdin or --items
-        file is refused.
+${wrap('INPUTS  ', `files, directories (.gitignore respected; outside git, dot-directories and
+build or dependency directories such as node_modules and dist are skipped), globs (Node 22+), - (stdin),
+--items FILE.jsonl|- (one {"id","text"} object or plain line each). Secret-like files (.env*, .envrc, keys,
+certs, credentials, kubeconfig, terraform vars/state, ...) are never sent, even when named explicitly.
+Symlinks are skipped unless --follow-symlinks. Binary files are skipped, and so are lock files and
+minified or source-map files. Any size is read up to a ${fmtBytes(HARD_MAX_BYTES)} hard cap per input; with
+--max-bytes N a larger file is skipped and a larger stdin or --items file is refused.`, 8)}
 
-CHUNKS  Nothing is truncated. An item longer than --chunk-chars is split at
-        line ends into overlapping chunks (500 chars), each judged on its own;
-        the highest-scoring chunk decides the item: filter and ask yes/no take
-        the highest probability, rank and ask --score the highest score.
-        classify and ask --choice: the default label is the last one (or
-        --default LABEL); a chunk whose label is the default does not vote,
-        the most confident voting chunk decides, and only if no chunk votes
-        is the item the default, at its best confidence. Output
-        shows "(N chunks, best lines A-B)". Because any one chunk can make an
-        item pass, ask positive questions ("does it contain X?"), not "does it
-        lack X?".
+${wrap('CHUNKS  ', `Nothing is truncated. An item longer than --chunk-chars is split at line ends into
+overlapping chunks (${CHUNK_OVERLAP} chars), each judged on its own; the highest-scoring chunk decides the
+item: filter and ask yes/no take the highest probability, rank and ask --score the highest score. classify
+and ask --choice: the default label is the last one (or --default LABEL); a chunk whose label is the default
+does not vote, the most confident voting chunk decides, and only if no chunk votes is the item the default,
+at its best confidence. Output shows "(N chunks, best lines A-B)". Because any one chunk can make an item
+pass, ask positive questions ("does it contain X?"), not "does it lack X?".`, 8)}
 
-PROVIDERS  ~/.quicksilver/providers.json ($QUICKSILVER_HOME/providers.json;
-        never read from the working directory) lists providers in priority
-        order: {"version": 1, "providers": [{"name": "openrouter",
-        "api_key": "$OPENROUTER_API_KEY"}, {"name": "typesafe"}, ...]}.
-        Built-in, in this default order: openrouter, typesafe, compatible
-        (needs a base_url), cloudflare (Workers AI; also needs
-        CLOUDFLARE_ACCOUNT_ID), vercel (AI Gateway). With a file, its entries
-        are the whole chain, in file order: a built-in it does not name is
-        never used. "api_key" is "$VAR", "\${VAR}",
-        a literal key (file must be chmod 600), or an array of these; a
-        provider whose key is unset is skipped. "enabled": false (or no,
-        off, 0, disabled, inactive) turns one off. A request that fails on a
-        rejected key, no credits, an unavailable model, 429 or 5xx/network
-        after retries moves to the next provider (never on a 400/422), and
-        the receipt says so; the failed provider is skipped for the rest of
-        the run. Until a provider has answered once, the run's other requests
-        wait for its first one, so a bad key costs one request, not one per
-        item. If every provider fails, each failure is listed (exit 3 if any
-        was a key or credit problem). --provider NAME pins one provider, no
-        fallback; with a file, NAME must be one of its entries. Each error is
-        logged to errors.log next to providers.json (kept 72 hours, keys
-        masked). Run status to see the chain. Example with every field:
-        providers.example.json in the skill folder (one level above this
-        script).
+${wrap('PROVIDERS  ', `~/.quicksilver/providers.json ($QUICKSILVER_HOME/providers.json; never read
+from the working directory) lists providers in priority order: {"version": 1, "providers": [{"name":
+"openrouter", "api_key": "$OPENROUTER_API_KEY"}, {"name": "typesafe"}, ...]}. Built-in, in this default
+order: ${BUILTINS.map((b) => (b.base_url ? b.name : `${b.name} (needs a base_url)`)).join(', ')}. With a
+file, its entries are the whole chain, in file order: a built-in it does not name is never used, and one it
+names supplies the fields the entry leaves out. Entry fields: ${FIELDS.join(', ')}; any other field is an
+error. A provider that is not built in needs ${REQUIRED.join(', ')}; "adapter" is one of
+${Object.keys(ADAPTERS).join(', ')}. "api_key" is "$VAR", "\${VAR}", a literal key (file must be chmod
+600), or an array of these (the first one set wins); a provider whose key is unset is skipped. "enabled" is
+on when absent; it takes a JSON boolean, 1, 0 or a word, case-insensitive: on = ${[...TRUE_WORDS].join(', ')};
+off = ${[...FALSE_WORDS].join(', ')}. Any other value is a config error (exit ${EXIT.USAGE}). A request that
+fails on a rejected key, no credits, an unavailable model, 429 or 5xx/network after retries moves to the next
+provider (never on a 400/422), and the receipt says so; the failed provider is skipped for the rest of the
+run. Until a provider has answered once, the run's other requests wait for its first one, so a bad key costs
+one request, not one per item. If every provider fails, each failure is listed (exit ${EXIT.KEY} if any was a
+key or credit problem). --provider NAME pins one provider, no fallback; with a file, NAME must be one of its
+entries. Each error is logged to errors.log next to providers.json (kept ${LOG_KEEP_HOURS} hours, keys
+masked). Run status to see the chain. Example with every field: providers.example.json in the skill folder
+(one level above this script).`, 8)}
 
 OPTIONS
- input    --lines             each non-empty line is an item (logs, lists)
-          --ext ts,tsx        only these file extensions
-          --chunk-chars 60000 chunk size, 1000-90000 (fits Jev's 32k context)
-          --limit 5000        refuse to run on more items than this
-          --max-bytes N       per-file/stdin/--items size cap (opt-in; at
-                              most 104857600, the 100 MB hard cap)
-          --no-secrets-guard  also send secret-looking files
-          --follow-symlinks   read symlink targets (default: skip and list them);
-                              the secret guard also checks the target's path
- output   --json              JSON on stdout, receipt on stderr
-          --save FILE         every per-item result to FILE (filter, classify)
-          --top N | --all     rank: show N (10) or all; find: show N (5)
-          --verbose           classify: every item with its confidence
-          --no-collapse       with --lines: don't merge repeated log patterns
-          --width 160         clip printed item text to this many chars
- accuracy --threshold 0.5 --band 0.15   filter: yes cutoff; cutoff±band = ?
-          --labels "a:hint,b" classify, ask --choice: text after : is a hint
-          --labels-json J|@f  classify: {"label": "description", ...}
-          --default LABEL     classify, ask --choice: the catch-all label
-                              (default: the last one); see CHUNKS
-          --question "..."    classify: ask this instead of "which label?"
-          --min-confidence 0.6  classify: below this is printed as ?
-          --only a,b          classify: print only these labels
-          --min-score 0.05 --chunk 150  find: drop weaker hits; lines/request
- ask      --state @file|text|-  the content to judge
-          --choice "a,b,c" | --score "low|mid|high"  label or scale, not y/n
- speed    --concurrency 16    parallel requests
-          --fast              pack small items per request: ~10x faster, less
-                              accurate (obvious needles in huge logs only)
-          --pack-items N --pack-tokens 3000  packing limits (N: 1, --fast 40)
- provider --provider NAME     use only this provider (default: the chain)
-          --model NAME        used where it fits the provider's model ids;
-                              setup --model saves it on that entry
+${[
+  optRow('input', '--lines', 'each non-empty line is an item (logs, lists)'),
+  optRow('', '--ext ts,tsx', 'only these file extensions'),
+  optRow('', `--chunk-chars ${DEFAULTS['chunk-chars']}`, `chunk size, ${CC_MIN}-${CC_MAX} (fits Jev's 32k context)`),
+  optRow('', `--limit ${DEFAULTS.limit}`, 'refuse to run on more items than this'),
+  optRow('', '--max-bytes N', `per-file/stdin/--items size cap (opt-in; at most ${HARD_MAX_BYTES}, the ${fmtBytes(HARD_MAX_BYTES)} hard cap)`),
+  optRow('', '--no-secrets-guard', 'also send secret-looking files'),
+  optRow('', '--follow-symlinks', "read symlink targets (default: skip and list them); the secret guard also checks the target's path"),
+  optRow('output', '--json', 'JSON on stdout, receipt on stderr'),
+  optRow('', '--save FILE', 'every per-item result to FILE (filter, classify)'),
+  optRow('', '--top N | --all', `rank: show N (${RANK_TOP}) or all; find: show N (${FIND_TOP})`),
+  optRow('', '--verbose', 'classify: every item with its confidence'),
+  optRow('', '--no-collapse', "with --lines: don't merge repeated log patterns"),
+  optRow('', `--width ${DEFAULTS.width}`, 'clip printed item text to this many chars'),
+  optRow('accuracy', `--threshold ${DEFAULTS.threshold}`, 'filter: the yes cutoff'),
+  optRow('', `--band ${DEFAULTS.band}`, 'filter: cutoff ± band is borderline, printed as ?'),
+  optRow('', '--labels "a:hint,b"', 'classify, ask --choice: text after : is a hint'),
+  optRow('', '--labels-json J|@f', 'classify: {"label": "description", ...}'),
+  optRow('', '--default LABEL', 'classify, ask --choice: the catch-all label (default: the last one); see CHUNKS'),
+  optRow('', '--question "..."', 'classify: ask this instead of "which label?"'),
+  optRow('', `--min-confidence ${DEFAULTS['min-confidence']}`, 'classify: below this is printed as ?'),
+  optRow('', '--only a,b', 'classify: print only these labels'),
+  optRow('', `--min-score ${DEFAULTS['min-score']}`, 'find: drop hits scoring below this'),
+  optRow('', `--chunk ${DEFAULTS.chunk}`, `find: lines per request, 1-${FIND_CHUNK_MAX}`),
+  optRow('ask', '--state @file|text|-', 'the content to judge'),
+  optRow('', '--choice "a,b,c"', 'answer with one of these labels, not yes/no'),
+  optRow('', '--score "low|mid|high"', 'rate on this scale, not yes/no'),
+  optRow('speed', `--concurrency ${DEFAULTS.concurrency}`, 'parallel requests'),
+  optRow('', '--fast', 'pack small items per request: ~10x faster, less accurate (obvious needles in huge logs only)'),
+  optRow('', `--pack-items ${DEFAULTS['pack-items']}`, `items per request (${FAST_PACK_ITEMS} with --fast)`),
+  optRow('', `--pack-tokens ${DEFAULTS['pack-tokens']}`, 'estimated tokens per packed request'),
+  optRow('provider', '--provider NAME', 'use only this provider (default: the chain)'),
+  optRow('', '--model NAME', "used where it fits the provider's model ids; setup --model saves it on that entry"),
+].join('\n')}
 
 ENVIRONMENT
-  OPENROUTER_API_KEY    openrouter key (built-in "$OPENROUTER_API_KEY")
-  JEV_API_KEY, TYPESAFE_API_KEY  typesafe key
-  JEV_GATEWAY_API_KEY   compatible key (with a base_url in providers.json)
-  CLOUDFLARE_API_TOKEN (or JEV_CLOUDFLARE_API_TOKEN) + CLOUDFLARE_ACCOUNT_ID
-                        cloudflare token and account
-  AI_GATEWAY_API_KEY    vercel key
-  QUICKSILVER_PROVIDER  same as --provider
-  QUICKSILVER_MODEL     model, used when --model is absent
-  QUICKSILVER_HOME      providers.json + stats directory, absolute path
-                        (default ~/.quicksilver)
-  QUICKSILVER_FOLLOW_SYMLINKS=1  same as --follow-symlinks
-  QUICKSILVER_MAX_BYTES  same as --max-bytes (the flag wins)
-  QUICKSILVER_CHUNK_CHARS  same as --chunk-chars (the flag wins)
+${[
+  ...BUILTINS.flatMap((b) => [
+    envRow(varNames(b.api_key).join(', '), `${b.name} key${varNames(b.api_key).length > 1 ? ' (the first one set wins)' : ''}${b.base_url ? '' : ', with a base_url in providers.json'}`),
+    ...(b.account_id ? [envRow(varNames(b.account_id).join(', '), `${b.name} account id`)] : []),
+  ]),
+  envRow('QUICKSILVER_PROVIDER', 'same as --provider'),
+  envRow('QUICKSILVER_MODEL', 'model, used when --model is absent'),
+  envRow('QUICKSILVER_HOME', 'directory of providers.json, stats and errors.log, an absolute path (default ~/.quicksilver)'),
+  envRow('QUICKSILVER_FOLLOW_SYMLINKS=1', 'same as --follow-symlinks'),
+  envRow('QUICKSILVER_MAX_BYTES', 'same as --max-bytes (the flag wins)'),
+  envRow('QUICKSILVER_CHUNK_CHARS', 'same as --chunk-chars (the flag wins)'),
+  envRow('QUICKSILVER_API_BASE', 'removed: refused while set (set "base_url" on the typesafe entry instead)'),
+].join('\n')}
 
-EXIT CODES  0 ok · 1 usage/input error · 3 key missing, rejected or out of
-            credits (re-run setup) · 4 request rejected · 5 request failed
+${wrap('EXIT CODES  ', Object.entries(EXIT_MEANING).map(([code, what], i, all) => `${code} ${what}${i < all.length - 1 ? ' ·' : ''}`))}
 
 EXAMPLES
   qs filter "Does this file handle user sessions?" src --ext ts,tsx
@@ -1392,18 +1439,25 @@ const COMMANDS = Object.fromEntries(Object.entries({ setup: cmdSetup, status: cm
     checkNums(args.flags);
     FLAGS = args.flags;
     MAX_BYTES = flagOrEnv(args.flags, 'max-bytes', 'QUICKSILVER_MAX_BYTES', HARD_MAX_BYTES);
-    CHUNK_CHARS = flagOrEnv(args.flags, 'chunk-chars', 'QUICKSILVER_CHUNK_CHARS', CHUNK_CHARS);
+    CHUNK_CHARS = flagOrEnv(args.flags, 'chunk-chars', 'QUICKSILVER_CHUNK_CHARS', DEFAULTS['chunk-chars']);
     resolveProvider(args.flags, name);
     return fn(args);
   }]));
 
-process.on('unhandledRejection', (e) => die(`unexpected error: ${e?.stack || e}`, 5));
-process.on('uncaughtException', (e) => die(`unexpected error: ${e?.stack || e}`, 5));
+// Read by the docs tests (tests/docs.test.mjs) to check HELP, README.md and SKILL.md against the code.
+export { HELP, OPTIONS, BUILTINS, FIELDS, TRUE_WORDS, FALSE_WORDS, EXIT, EXIT_MEANING };
 
-const [cmd, ...rest] = process.argv.slice(2);
-const args = parseArgs(rest);
-// `qs <command> --help` must show help too, not fail on the missing arguments. Help comes from the parsed
-// flags, so a flag's value (`--state -h`, `--labels -h`) or anything after `--` never triggers it.
-if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h' || args.flags.help) { console.log(HELP); process.exit(0); }
-if (!COMMANDS[cmd]) die(`unknown command "${cmd}"\n\n${HELP}`);
-await COMMANDS[cmd](args);
+// The CLI runs only when this file is executed (node qs.mjs ...). Importing it, as the docs tests do, must not
+// parse process.argv, install the crash handlers or exit.
+if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
+  process.on('unhandledRejection', (e) => die(`unexpected error: ${e?.stack || e}`, EXIT.FAILED));
+  process.on('uncaughtException', (e) => die(`unexpected error: ${e?.stack || e}`, EXIT.FAILED));
+
+  const [cmd, ...rest] = process.argv.slice(2);
+  const args = parseArgs(rest);
+  // `qs <command> --help` must show help too, not fail on the missing arguments. Help comes from the parsed
+  // flags, so a flag's value (`--state -h`, `--labels -h`) or anything after `--` never triggers it.
+  if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h' || args.flags.help) { console.log(HELP); process.exit(EXIT.OK); }
+  if (!COMMANDS[cmd]) die(`unknown command "${cmd}"\n\n${HELP}`);
+  await COMMANDS[cmd](args);
+}

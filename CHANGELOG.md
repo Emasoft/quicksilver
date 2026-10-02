@@ -30,6 +30,12 @@
   simply first in the default chain.
 - A model from `--model` / `QUICKSILVER_MODEL` is used only by providers whose
   `model_pattern` it matches.
+- An unknown option (a typo, or the removed `--max-chars`) exits 1 naming it,
+  instead of being ignored.
+- `find --chunk` above 250 exits 1 instead of being cut to 250 silently.
+- `qs help` is built from the constants the code runs on, and SKILL.md embeds
+  it verbatim (`npm run sync-docs` regenerates it; a test fails when it is
+  stale).
 
 ### Removed
 - `--max-chars` (replaced by chunking).
