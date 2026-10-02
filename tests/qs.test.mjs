@@ -64,19 +64,26 @@ after(() => {
   fs.rmSync(TMP, { recursive: true, force: true });
 });
 
+// providers.json in the test home. Mode 0600 by default, since a file holding a literal key must be private.
+function writeProviders(providers, { mode = 0o600, home = QHOME, raw } = {}) {
+  const file = path.join(home, 'providers.json');
+  fs.writeFileSync(file, raw ?? JSON.stringify({ version: 1, providers }));
+  fs.chmodSync(file, mode);
+}
+const readProviders = () => JSON.parse(fs.readFileSync(path.join(QHOME, 'providers.json'), 'utf8'));
+
 beforeEach(() => {
   reqs.length = 0;
   verifyStatus = 200;
   postStatus = 200;
   QHOME = fs.mkdtempSync(path.join(TMP, 'home-'));
+  // typesafe points at the mock; no other provider has a key in childEnv, so the chain is just typesafe.
+  writeProviders([{ name: 'typesafe', base_url: BASE }]);
 });
 
 // Minimal child env, built from scratch so the developer's real keys never reach the child.
 function childEnv(extra) {
-  const env = {
-    PATH: process.env.PATH, HOME: QHOME, QUICKSILVER_HOME: QHOME,
-    JEV_API_KEY: KEY, QUICKSILVER_API_BASE: BASE, QUICKSILVER_PROVIDER: 'typesafe', ...extra,
-  };
+  const env = { PATH: process.env.PATH, HOME: QHOME, QUICKSILVER_HOME: QHOME, JEV_API_KEY: KEY, ...extra };
   return Object.fromEntries(Object.entries(env).filter(([, v]) => v !== undefined));
 }
 
@@ -242,19 +249,29 @@ describe('m1: .gitignore is respected even when nothing is left', () => {
   });
 });
 
-describe('m2: QUICKSILVER_API_BASE must be https off localhost', () => {
+describe('m2: a provider base_url must be https off localhost', () => {
   test('plain http to a non-localhost host exits 1 before sending the key', async () => {
+    writeProviders([{ name: 'typesafe', base_url: `http://[::ffff:127.0.0.1]:${port}` }]);
     const dir = mkdir({ 'a.txt': 'hello-a' });
-    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { QUICKSILVER_API_BASE: `http://[::ffff:127.0.0.1]:${port}` } });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir });
     assert.equal(r.code, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /QUICKSILVER_API_BASE/);
+    assert.match(r.stderr, /base_url.*https/);
     assert.equal(reqs.length, 0);
   });
 
   test('plain http to localhost is allowed', async () => {
+    writeProviders([{ name: 'typesafe', base_url: `http://localhost:${port}` }]);
     const dir = mkdir({ 'a.txt': 'hello-a' });
-    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { QUICKSILVER_API_BASE: `http://localhost:${port}` } });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir });
     assert.equal(r.code, 0, r.stderr);
+  });
+
+  test('QUICKSILVER_API_BASE is refused instead of being ignored', async () => {
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { QUICKSILVER_API_BASE: BASE } });
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /QUICKSILVER_API_BASE .*base_url/);
+    assert.equal(reqs.length, 0);
   });
 });
 
@@ -264,9 +281,9 @@ describe('m3: the installer detects an exported key instead of asking for one', 
     const claude = fs.mkdtempSync(path.join(TMP, 'claude-'));
     const r = await runNode(BIN, ['install', '--provider', 'typesafe'], { env: { CLAUDE_CONFIG_DIR: claude } });
     assert.equal(r.code, 0, r.stderr);
-    assert.match(r.stdout + r.stderr, /env JEV_API_KEY/);
+    assert.match(r.stdout + r.stderr, /\$JEV_API_KEY/);
     assert.doesNotMatch(r.stdout, /set your Jev key|paste your/i);
-    assert.equal(fs.existsSync(path.join(QHOME, 'config.json')), false);
+    assert.deepEqual(readProviders(), { version: 1, providers: [{ name: 'typesafe', base_url: BASE }] });
     assert.ok(fs.existsSync(path.join(claude, 'skills', 'quicksilver', 'scripts', 'qs.mjs')));
   });
 });
@@ -306,20 +323,28 @@ describe('m4: malformed user JSON is a usage error (exit 1), not a crash', () =>
 });
 
 describe('m6: a corrupt config or stats file is reported, not silently reset', () => {
-  test('corrupt config.json exits 1 before any request', async () => {
-    fs.writeFileSync(path.join(QHOME, 'config.json'), '{bad');
+  test('corrupt providers.json exits 1 before any request, with only a line and column', async () => {
+    writeProviders(null, { raw: '{bad' });
     const dir = mkdir({ 'a.txt': 'hello-a' });
     const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir });
     assert.equal(r.code, 1, r.stdout + r.stderr);
-    assert.match(r.stderr, /config\.json/);
+    assert.match(r.stderr, /providers\.json is not valid JSON at line 1, column 2/);
     assert.equal(reqs.length, 0);
   });
 
-  test('setup --remove refuses to overwrite a corrupt config', async () => {
-    fs.writeFileSync(path.join(QHOME, 'config.json'), '{bad');
+  test('a parse error never quotes the file, which may hold a literal key', async () => {
+    writeProviders(null, { raw: '{"version": 1, "providers": [{"name": "typesafe", "api_key": "sk-SECRET-123" }' });
+    const r = await qs(['status']);
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /not valid JSON/);
+    assert.doesNotMatch(r.stdout + r.stderr, /SECRET/);
+  });
+
+  test('setup --remove refuses to overwrite a corrupt providers.json', async () => {
+    writeProviders(null, { raw: '{bad' });
     const r = await qs(['setup', '--remove']);
     assert.equal(r.code, 1);
-    assert.equal(fs.readFileSync(path.join(QHOME, 'config.json'), 'utf8'), '{bad');
+    assert.equal(fs.readFileSync(path.join(QHOME, 'providers.json'), 'utf8'), '{bad');
   });
 
   test('corrupt stats.json exits 1 and is left untouched', async () => {
@@ -331,9 +356,6 @@ describe('m6: a corrupt config or stats file is reported, not silently reset', (
     assert.equal(fs.readFileSync(path.join(QHOME, 'stats.json'), 'utf8'), '{bad');
   });
 });
-
-const readCfg = () => JSON.parse(fs.readFileSync(path.join(QHOME, 'config.json'), 'utf8'));
-const writeCfg = (o) => fs.writeFileSync(path.join(QHOME, 'config.json'), JSON.stringify(o));
 
 describe('m5: stdin and --items reads are bounded', () => {
   // The default bound is the 100 MB hard cap (tested under --max-bytes); a 2 MB --max-bytes keeps these fast.
@@ -401,13 +423,12 @@ describe('nits: config and stats files', () => {
     assert.match(r.stderr, /warning: .*stats\.json/);
   });
 
-  test('setup creates the config directory with mode 0700 and the config 0600', async () => {
-    const home = path.join(QHOME, 'fresh');
-    const r = await qs(['setup'], { env: { JEV_API_KEY: undefined, QUICKSILVER_HOME: home }, input: 'ts-key\n' });
+  test('setup writes providers.json 0600, atomically', async () => {
+    writeProviders([{ name: 'typesafe', base_url: BASE }], { mode: 0o644 }); // no literal key yet, so 0644 is allowed
+    const r = await qs(['setup', '--provider', 'typesafe'], { env: { JEV_API_KEY: undefined }, input: 'ts-key\n' });
     assert.equal(r.code, 0, r.stderr);
-    assert.equal(fs.statSync(home).mode & 0o777, 0o700);
-    assert.equal(fs.statSync(path.join(home, 'config.json')).mode & 0o777, 0o600);
-    assert.deepEqual(fs.readdirSync(home), ['config.json']); // atomic write leaves no temp file behind
+    assert.equal(fs.statSync(path.join(QHOME, 'providers.json')).mode & 0o777, 0o600);
+    assert.deepEqual(fs.readdirSync(QHOME), ['providers.json']); // atomic write leaves no temp file behind
   });
 });
 
@@ -427,7 +448,7 @@ describe('review 1 and 7: provider errors map to exit 3', () => {
       const r = await qs(['setup'], { env: { JEV_API_KEY: undefined }, input: 'ts-key\n' });
       assert.equal(r.code, 3, r.stderr);
       assert.match(r.stderr, msg);
-      assert.equal(fs.existsSync(path.join(QHOME, 'config.json')), false);
+      assert.deepEqual(readProviders().providers, [{ name: 'typesafe', base_url: BASE }]);
     });
   }
 });
@@ -472,7 +493,7 @@ describe('review 3: --provider= with no value', () => {
 
 describe('review 4: installer passes --provider to its status pre-check', () => {
   test('a saved typesafe key does not count as ready for --provider openrouter', async () => {
-    writeCfg({ provider: 'typesafe', api_key: KEY }); // legacy layout: every version reads it
+    writeProviders([{ name: 'typesafe', base_url: BASE, api_key: KEY }]);
     const claude = fs.mkdtempSync(path.join(TMP, 'claude-'));
     const r = await runNode(BIN, ['install', '--provider', 'openrouter'], { env: { CLAUDE_CONFIG_DIR: claude, JEV_API_KEY: undefined } });
     assert.equal(r.code, 0, r.stderr);
@@ -490,13 +511,21 @@ describe('review 5: a model id is used only with the provider it fits', () => {
     assert.match(r.stderr, /QUICKSILVER_MODEL/);
   });
 
-  test('a saved model that does not fit the provider is ignored, with a warning', async () => {
-    writeCfg({ provider: 'typesafe', model: 'vendor/other-model', keys: { typesafe: KEY } });
+  test('a providers.json model that does not fit the provider exits 1 naming the field', async () => {
+    writeProviders([{ name: 'typesafe', base_url: BASE, model: 'vendor/other-model' }]);
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir });
+    assert.equal(r.code, 1, r.stderr);
+    assert.match(r.stderr, /"model" .*vendor\/other-model.*model_pattern/);
+    assert.equal(reqs.length, 0);
+  });
+
+  test('a providers.json model that fits is sent', async () => {
+    writeProviders([{ name: 'typesafe', base_url: BASE, model: 'jev-saved' }]);
     const dir = mkdir({ 'a.txt': 'hello-a' });
     const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir });
     assert.equal(r.code, 0, r.stderr);
-    assert.match(sent(), /"model":"jev-latest"/);
-    assert.match(r.stderr, /vendor\/other-model/);
+    assert.match(sent(), /"model":"jev-saved"/);
   });
 
   test('a fitting QUICKSILVER_MODEL is used silently', async () => {
@@ -508,38 +537,40 @@ describe('review 5: a model id is used only with the provider it fits', () => {
   });
 });
 
-describe('review 6: one saved key per provider', () => {
-  test('setup for typesafe keeps a saved openrouter key and migrates the legacy layout', async () => {
-    writeCfg({ provider: 'openrouter', api_key: 'or-key' });
-    const r = await qs(['setup'], { env: { JEV_API_KEY: undefined }, input: 'ts-key\n' });
+describe('review 6: one saved key per provider, in providers.json', () => {
+  test('setup stores a literal key on its own entry and keeps the other entries', async () => {
+    writeProviders([{ name: 'typesafe', base_url: BASE }, { name: 'openrouter', api_key: 'or-key' }]);
+    const r = await qs(['setup', '--provider', 'typesafe'], { env: { JEV_API_KEY: undefined }, input: 'ts-key\n' });
     assert.equal(r.code, 0, r.stderr);
-    const cfg = readCfg();
-    assert.deepEqual(cfg.keys, { openrouter: 'or-key', typesafe: 'ts-key' });
-    assert.equal(cfg.api_key, undefined);
-    assert.equal(cfg.provider, 'typesafe');
+    assert.deepEqual(readProviders(), { version: 1, providers: [{ name: 'typesafe', base_url: BASE, api_key: 'ts-key' }, { name: 'openrouter', api_key: 'or-key' }] });
+    assert.doesNotMatch(r.stdout + r.stderr, /ts-key/);
   });
 
-  test('setup --remove removes only the active provider key', async () => {
-    writeCfg({ provider: 'typesafe', keys: { typesafe: 'ts-key', openrouter: 'or-key' } });
-    const r = await qs(['setup', '--remove']);
-    assert.equal(r.code, 0, r.stderr);
-    assert.deepEqual(readCfg().keys, { openrouter: 'or-key' });
+  test('setup --model saves the model on that entry; a model that does not fit is refused', async () => {
+    const ok = await qs(['setup', '--provider', 'typesafe', '--model', 'jev-pinned'], { env: { JEV_API_KEY: undefined }, input: 'ts-key\n' });
+    assert.equal(ok.code, 0, ok.stderr);
+    assert.equal(readProviders().providers[0].model, 'jev-pinned');
+    const bad = await qs(['setup', '--provider', 'typesafe', '--model', 'vendor/x'], { env: { JEV_API_KEY: undefined }, input: 'ts-key2\n' });
+    assert.equal(bad.code, 1, bad.stderr);
+    assert.equal(readProviders().providers[0].api_key, 'ts-key');
   });
 
-  test('a legacy config key is still used before any write', async () => {
-    writeCfg({ provider: 'typesafe', api_key: 'legacy-key' });
-    const dir = mkdir({ 'a.txt': 'hello-a' });
-    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { JEV_API_KEY: undefined } });
+  test('setup --remove removes only that entry\'s api_key', async () => {
+    writeProviders([{ name: 'typesafe', base_url: BASE, api_key: 'ts-key' }, { name: 'openrouter', api_key: 'or-key' }]);
+    const r = await qs(['setup', '--remove', '--provider', 'typesafe']);
     assert.equal(r.code, 0, r.stderr);
-    assert.equal(reqs[0].auth, 'Bearer legacy-key');
+    assert.deepEqual(readProviders().providers, [{ name: 'typesafe', base_url: BASE }, { name: 'openrouter', api_key: 'or-key' }]);
   });
 
-  test('the saved key of the active provider is used', async () => {
-    writeCfg({ provider: 'typesafe', keys: { typesafe: 'ts-key', openrouter: 'or-key' } });
+  test('a saved literal key is used, and status names its source but never prints it', async () => {
+    writeProviders([{ name: 'typesafe', base_url: BASE, api_key: 'ts-key' }]);
     const dir = mkdir({ 'a.txt': 'hello-a' });
     const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { JEV_API_KEY: undefined } });
     assert.equal(r.code, 0, r.stderr);
     assert.equal(reqs[0].auth, 'Bearer ts-key');
+    const s = await qs(['status'], { env: { JEV_API_KEY: undefined } });
+    assert.match(s.stdout, /typesafe +ready · key literal in providers\.json/);
+    assert.doesNotMatch(s.stdout + s.stderr, /ts-key/);
   });
 });
 
@@ -817,5 +848,206 @@ describe('chunking: a long item is split, never truncated', () => {
     assert.equal(b.code, 1);
     assert.match(b.stderr, /QUICKSILVER_CHUNK_CHARS/);
     assert.equal(reqs.length, 0);
+  });
+});
+
+// A second System One provider served by the same mock, told apart by its key and model.
+const mock2 = (extra = {}) => ({ name: 'mock2', base_url: BASE, path: '/v1/systemone', adapter: 'system-one', api_key: '$MOCK2_KEY', model: 'm2', ...extra });
+
+describe('providers.json: the array order is the chain', () => {
+  test('no file: the built-in chain is openrouter, typesafe, compatible; keys missing means exit 3', async () => {
+    fs.rmSync(path.join(QHOME, 'providers.json'));
+    const r = await qs(['status'], { env: { JEV_API_KEY: undefined } });
+    assert.equal(r.code, 3, r.stdout + r.stderr);
+    assert.match(r.stdout, /^1\. openrouter +key missing \(\$OPENROUTER_API_KEY\)$/m);
+    assert.match(r.stdout, /^2\. typesafe +key missing \(\$JEV_API_KEY, \$TYPESAFE_API_KEY\)$/m);
+    assert.match(r.stdout, /^3\. compatible +not configured \(no base_url\)$/m);
+  });
+
+  test('file entries come first, in file order, then the built-ins the file does not name', async () => {
+    writeProviders([mock2(), { name: 'typesafe', base_url: BASE }]);
+    const r = await qs(['status'], { env: { MOCK2_KEY: 'k2' } });
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^1\. mock2 +ready \(key not verified: no free check\) · key \$MOCK2_KEY · model m2$/m);
+    assert.match(r.stdout, /^2\. typesafe +ready · key \$JEV_API_KEY · model jev-latest$/m);
+    assert.match(r.stdout, /^3\. openrouter /m);
+    assert.match(r.stdout, /^4\. compatible /m);
+  });
+
+  test('requests go to the first ready provider', async () => {
+    writeProviders([mock2(), { name: 'typesafe', base_url: BASE }]);
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { MOCK2_KEY: 'k2' } });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(reqs[0].auth, 'Bearer k2');
+    assert.match(sent(), /"model":"m2"/);
+    assert.match(r.stdout, /via mock2 \(mock\)/);
+  });
+
+  test('a provider whose key variable is unset is skipped silently', async () => {
+    writeProviders([mock2(), { name: 'typesafe', base_url: BASE }]);
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.stderr, '');
+    assert.equal(reqs[0].auth, `Bearer ${KEY}`);
+    assert.equal(fs.existsSync(path.join(QHOME, 'errors.log')), false);
+  });
+
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: a literal ${NAME} reference is what is tested
+  test('${VAR} works, and in an array the first set value wins', async () => {
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: same
+    writeProviders([mock2({ api_key: ['$UNSET_ONE', '${MOCK2_KEY}'] })]);
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { MOCK2_KEY: 'k2' } });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(reqs[0].auth, 'Bearer k2');
+  });
+
+  test('OPENROUTER_API_KEY no longer jumps the queue: the file order decides', async () => {
+    writeProviders([{ name: 'typesafe', base_url: BASE }, { name: 'openrouter', base_url: BASE }]);
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { OPENROUTER_API_KEY: 'sk-or-x' } });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(reqs[0].auth, `Bearer ${KEY}`);
+  });
+
+  test('--provider and QUICKSILVER_PROVIDER pin one provider', async () => {
+    writeProviders([{ name: 'openrouter', base_url: BASE }, { name: 'typesafe', base_url: BASE }]);
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { OPENROUTER_API_KEY: 'sk-or-x' } });
+    await qs(['filter', 'q?', 'a.txt', '--provider', 'typesafe'], { cwd: dir, env: { OPENROUTER_API_KEY: 'sk-or-x' } });
+    await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { OPENROUTER_API_KEY: 'sk-or-x', QUICKSILVER_PROVIDER: 'typesafe' } });
+    assert.deepEqual(reqs.map((q) => q.auth), ['Bearer sk-or-x', `Bearer ${KEY}`, `Bearer ${KEY}`]);
+  });
+
+  test('a pinned provider without a key exits 3 naming every variable tried', async () => {
+    writeProviders([mock2({ api_key: ['$MOCK2_KEY', '$MOCK2_ALT'] }), { name: 'typesafe', base_url: BASE }]);
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    for (const opts of [{ args: ['--provider', 'mock2'] }, { env: { QUICKSILVER_PROVIDER: 'mock2' } }]) {
+      const r = await qs(['filter', 'q?', 'a.txt', ...(opts.args || [])], { cwd: dir, env: opts.env });
+      assert.equal(r.code, 3, r.stderr);
+      assert.match(r.stderr, /mock2.*\$MOCK2_KEY, \$MOCK2_ALT/);
+    }
+    assert.equal(reqs.length, 0);
+  });
+
+  test('a pinned disabled provider and an unknown provider exit 1', async () => {
+    writeProviders([{ name: 'typesafe', base_url: BASE, enabled: false }]);
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const d = await qs(['filter', 'q?', 'a.txt', '--provider', 'typesafe'], { cwd: dir });
+    assert.equal(d.code, 1, d.stderr);
+    assert.match(d.stderr, /typesafe.*disabled/);
+    const u = await qs(['filter', 'q?', 'a.txt', '--provider', 'nope'], { cwd: dir });
+    assert.equal(u.code, 1, u.stderr);
+    assert.match(u.stderr, /unknown provider "nope"/);
+    assert.equal(reqs.length, 0);
+  });
+
+  test('no usable provider at all exits 3 with what to set', async () => {
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { JEV_API_KEY: undefined } });
+    assert.equal(r.code, 3, r.stderr);
+    assert.match(r.stderr, /no provider is ready.*\$OPENROUTER_API_KEY/s);
+    assert.equal(reqs.length, 0);
+  });
+});
+
+describe('providers.json: "enabled" and its synonyms', () => {
+  const on = [true, 1, 'true', 'TRUE', 'enabled', 'enable', '1', 'yes', 'y', 'Active', 'on'];
+  const off = [false, 0, 'false', 'disabled', 'disable', '0', 'no', 'N', 'inactive', 'OFF'];
+  for (const [vals, want] of [[on, 'ready'], [off, 'disabled']]) {
+    test(`${vals.map(String).join(', ')} mean ${want}`, async () => {
+      for (const v of vals) {
+        writeProviders([{ name: 'typesafe', base_url: BASE, enabled: v }]);
+        const r = await qs(['status']);
+        assert.match(r.stdout, new RegExp(`^1\\. typesafe +${want}`, 'm'), `enabled: ${JSON.stringify(v)}\n${r.stdout}${r.stderr}`);
+      }
+    });
+  }
+
+  test('any other value exits 1 naming the provider and the value', async () => {
+    writeProviders([{ name: 'typesafe', base_url: BASE, enabled: 'maybe' }]);
+    const r = await qs(['status']);
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /"typesafe".*"enabled".*"maybe"/);
+  });
+});
+
+describe('providers.json: strict validation, exit 1 naming the field', () => {
+  // thunks: BASE (inside mock2) is only known once the mock server listens
+  const cases = [
+    ['version 2', () => ({ version: 2, providers: [] }), /"version" must be 1/],
+    ['unknown top-level field', () => ({ version: 1, providers: [], extra: 1 }), /unknown field "extra"/],
+    ['providers not an array', () => ({ version: 1, providers: {} }), /"providers" must be an array/],
+    ['unknown entry field', () => [{ name: 'typesafe', colour: 'red' }], /"typesafe".*unknown field "colour"/],
+    ['bad adapter', () => [mock2({ adapter: 'soap' })], /"adapter" must be one of/],
+    ['new provider without a model', () => [{ name: 'x1', base_url: BASE, path: '/p', adapter: 'system-one', api_key: '$X' }], /"x1".*"model" is required/],
+    ['duplicate name', () => [{ name: 'typesafe' }, { name: 'typesafe' }], /duplicate name "typesafe"/],
+    ['bad name', () => [{ name: 'Bad Name' }], /"name" must be/],
+    ['bad $ reference', () => [mock2({ api_key: '$1BAD' })], /"api_key".*\$NAME/],
+    ['empty api_key array', () => [mock2({ api_key: [] })], /"api_key" must be/],
+    ['secret header', () => [mock2({ headers: { 'X-Api-Key': 'v' } })], /header "X-Api-Key"/],
+    ['same $VAR in two providers', () => [mock2({ api_key: '$JEV_API_KEY' })], /\$JEV_API_KEY.*"mock2".*"typesafe"/],
+    ['invalid model_pattern', () => [mock2({ model_pattern: '(' })], /"model_pattern"/],
+    ['path without a leading slash', () => [mock2({ path: 'v1' })], /"path" must start with \//],
+    ['negative usd_per_mtok', () => [mock2({ usd_per_mtok: -1 })], /"usd_per_mtok"/],
+    ['base_url with a query', () => [mock2({ base_url: `${BASE}?x=1` })], /"base_url" must not hold/],
+  ];
+  for (const [name, make, re] of cases) {
+    test(name, async () => {
+      const doc = make();
+      writeProviders(null, { raw: JSON.stringify(Array.isArray(doc) ? { version: 1, providers: doc } : doc) });
+      const dir = mkdir({ 'a.txt': 'hello-a' });
+      const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { MOCK2_KEY: 'k2' } });
+      assert.equal(r.code, 1, r.stdout + r.stderr);
+      assert.match(r.stderr, re);
+      assert.equal(reqs.length, 0);
+    });
+  }
+});
+
+describe('providers.json: where it is read from, and what replaced config.json', () => {
+  test('a literal key in a file other users can read is refused with the chmod fix', async () => {
+    writeProviders([{ name: 'typesafe', base_url: BASE, api_key: 'sk-literal-1' }], { mode: 0o644 });
+    const r = await qs(['status']);
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /chmod 600 .*providers\.json/);
+    assert.doesNotMatch(r.stdout + r.stderr, /sk-literal-1/);
+  });
+
+  test('providers.json in the working directory is never read', async () => {
+    const dir = mkdir({ 'a.txt': 'hello-a', 'providers.json': JSON.stringify({ version: 1, providers: [{ name: 'typesafe', enabled: false }] }) });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(reqs.length, 1);
+  });
+
+  test('a relative QUICKSILVER_HOME exits 1', async () => {
+    const r = await qs(['status'], { env: { QUICKSILVER_HOME: 'rel/home' } });
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /QUICKSILVER_HOME must be an absolute path/);
+  });
+
+  test('an old config.json exits 1 saying what to move, without printing the key', async () => {
+    fs.writeFileSync(path.join(QHOME, 'config.json'), JSON.stringify({ provider: 'typesafe', model: 'jev-x', keys: { typesafe: 'sk-LEGACY-SECRET' } }));
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir });
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /config\.json is no longer read/);
+    assert.match(r.stderr, /providers\.json/);
+    assert.match(r.stderr, /key.* typesafe/);
+    assert.match(r.stderr, /model "jev-x"/);
+    assert.doesNotMatch(r.stderr, /SECRET/);
+    assert.equal(reqs.length, 0);
+  });
+
+  test('status: a rejected key and an empty wallet are named, and exit 3 when nothing is ready', async () => {
+    for (const [code, want] of [[401, /typesafe +rejected \(HTTP 401\)/], [402, /typesafe +no credits \(HTTP 402\)/]]) {
+      verifyStatus = code;
+      const r = await qs(['status']);
+      assert.equal(r.code, 3, r.stdout + r.stderr);
+      assert.match(r.stdout, want);
+    }
   });
 });

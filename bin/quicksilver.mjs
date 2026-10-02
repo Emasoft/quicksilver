@@ -38,9 +38,9 @@ if (cmd === 'install') {
     if (rest[i].startsWith('--provider=')) providerArgs.push(rest[i]);
     else if (rest[i] === '--provider' && rest[i + 1] && !rest[i + 1].startsWith('--')) providerArgs.push(rest[i], rest[++i]);
   }
-  // An exported key is the primary path: report it and never prompt. `status` names the provider that will
-  // actually be used (OPENROUTER_API_KEY wins unless --provider/QUICKSILVER_PROVIDER says otherwise) and the
-  // env var it read; setup is skipped even if the check fails, since setup would not override the env var.
+  // An exported key is the primary path: report it and never prompt. `status` lists the provider chain from
+  // providers.json in order, with the variable each provider read; setup is skipped even if a check fails,
+  // since the user chose the exported key. The names are the built-in providers' variables.
   const envKey = ['OPENROUTER_API_KEY', 'JEV_API_KEY', 'TYPESAFE_API_KEY'].find((n) => process.env[n]);
   if (keyFlag) run(['setup', keyFlag, ...providerArgs]);
   else if (envKey) {
@@ -59,7 +59,7 @@ if (cmd === 'install') {
   console.log(`Try asking: "which files in this repo handle auth?" or "find the errors in app.log".`);
 } else if (cmd === 'uninstall') {
   fs.rmSync(DEST, { recursive: true, force: true });
-  console.log(`Removed ${DEST}. Your key stays in ~/.quicksilver/config.json. Delete that folder to remove it.`);
+  console.log(`Removed ${DEST}. Saved keys stay in ~/.quicksilver/providers.json. Delete that folder to remove them.`);
 } else {
   if (!fs.existsSync(QS)) {
     const local = path.join(SRC, 'scripts', 'qs.mjs');
