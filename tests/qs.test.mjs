@@ -903,14 +903,37 @@ describe('providers.json: the array order is the chain', () => {
     assert.match(r.stdout, /^5\. vercel +key missing \(\$AI_GATEWAY_API_KEY\)$/m);
   });
 
-  test('file entries come first, in file order, then the built-ins the file does not name', async () => {
+  test('the chain is exactly the file entries, in file order: no built-in is appended', async () => {
     writeProviders([mock2(), { name: 'typesafe', base_url: BASE }]);
     const r = await qs(['status'], { env: { MOCK2_KEY: 'k2' } });
     assert.equal(r.code, 0, r.stdout + r.stderr);
     assert.match(r.stdout, /^1\. mock2 +ready \(key not verified: no free check\) · key \$MOCK2_KEY · model m2$/m);
     assert.match(r.stdout, /^2\. typesafe +ready · key \$JEV_API_KEY · model jev-latest$/m);
-    assert.match(r.stdout, /^3\. openrouter /m);
-    assert.match(r.stdout, /^4\. compatible /m);
+    assert.doesNotMatch(r.stdout, /^3\./m);
+  });
+
+  test('a file naming only openrouter: status lists exactly that one provider', async () => {
+    writeProviders([{ name: 'openrouter', base_url: BASE }]);
+    const r = await qs(['status'], { env: { OPENROUTER_API_KEY: 'sk-or-x', JEV_API_KEY: undefined, AI_GATEWAY_API_KEY: 'vk' } });
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.deepEqual(r.stdout.match(/^\d+\. \S+/gm), ['1. openrouter']);
+  });
+
+  test('a provider removed from the file is never called, even with its key exported', async () => {
+    writeProviders([mock2()]);
+    failFor['Bearer k2'] = [401];
+    const dir = mkdir({ 'a.txt': 'hello-a' });
+    const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { MOCK2_KEY: 'k2', JEV_API_KEY: undefined, AI_GATEWAY_API_KEY: 'vk' } });
+    assert.equal(r.code, 3, r.stderr);
+    assert.deepEqual(reqs.map((q) => q.auth), ['Bearer k2']);
+    assert.doesNotMatch(r.stderr, /vercel/);
+  });
+
+  test('setup --provider can still add a built-in the file does not name', async () => {
+    writeProviders([{ name: 'typesafe', base_url: BASE }]);
+    const r = await qs(['setup', 'sk-or-new', '--provider', 'vercel']);
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    assert.deepEqual(readProviders().providers.map((e) => e.name), ['typesafe', 'vercel']);
   });
 
   test('requests go to the first ready provider', async () => {
@@ -984,6 +1007,7 @@ describe('providers.json: the array order is the chain', () => {
   });
 
   test('no usable provider at all exits 3 with what to set', async () => {
+    fs.rmSync(path.join(QHOME, 'providers.json')); // no file: the built-in chain, openrouter first
     const dir = mkdir({ 'a.txt': 'hello-a' });
     const r = await qs(['filter', 'q?', 'a.txt'], { cwd: dir, env: { JEV_API_KEY: undefined } });
     assert.equal(r.code, 3, r.stderr);
@@ -1027,7 +1051,7 @@ describe('providers.json: strict validation, exit 1 naming the field', () => {
     ['bad $ reference', () => [mock2({ api_key: '$1BAD' })], /"api_key".*\$NAME/],
     ['empty api_key array', () => [mock2({ api_key: [] })], /"api_key" must be/],
     ['secret header', () => [mock2({ headers: { 'X-Api-Key': 'v' } })], /header "X-Api-Key"/],
-    ['same $VAR in two providers', () => [mock2({ api_key: '$JEV_API_KEY' })], /\$JEV_API_KEY.*"mock2".*"typesafe"/],
+    ['same $VAR in two providers', () => [mock2({ api_key: '$JEV_API_KEY' }), { name: 'typesafe' }],/\$JEV_API_KEY.*"mock2".*"typesafe"/],
     ['invalid model_pattern', () => [mock2({ model_pattern: '(' })], /"model_pattern"/],
     ['path without a leading slash', () => [mock2({ path: 'v1' })], /"path" must start with \//],
     ['negative usd_per_mtok', () => [mock2({ usd_per_mtok: -1 })], /"usd_per_mtok"/],

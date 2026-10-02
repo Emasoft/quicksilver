@@ -270,8 +270,11 @@ function readProvidersFile() {
   return parseConfigJson(raw, PROVIDERS_FILE);
 }
 
-// doc -> the merged chain: the file's entries in file order, then each built-in the file does not name. A built-in
-// named in the file is overridden field by field; any other name is a new provider and must be complete.
+// doc -> the chain: exactly the file's entries, in file order. User decision: the array order "is the exact order
+// of priority and fallback ... any change or addition to the providers will reflect the fallback", so a built-in
+// the file does not name is never appended (removing vercel from the file must stop every request to vercel). A
+// built-in named in the file only supplies defaults, overridden field by field; any other name is a new provider
+// and must be complete. With no file, the caller passes every built-in by name.
 function buildProviders(doc) {
   const where = PROVIDERS_FILE;
   if (!isObj(doc)) die(`${where} must hold a JSON object`);
@@ -290,7 +293,6 @@ function buildProviders(doc) {
     if (!base) for (const f of REQUIRED) if (e[f] === undefined) die(`${at} ("${e.name}"): "${f}" is required for a provider that is not built in`);
     out.push(checkEntry({ ...base, ...e }, `${at} ("${e.name}")`));
   }
-  for (const b of BUILTINS) if (!seen.has(b.name)) out.push(checkEntry({ ...b }, `built-in provider "${b.name}"`));
   // One $VAR, one provider: otherwise a key exported for one service would be sent to another one's URL.
   const owner = new Map();
   for (const p of out.filter((x) => x.enabled)) {
@@ -315,19 +317,24 @@ function prepare(p) {
   return { ...p, key: key.value, keySource: key.source, tried: key.tried, acctTried: acct?.tried, state, base, url: base + p.path.replace('{account_id}', acct?.value ?? '') };
 }
 
-function resolveProvider(flags) {
+const builtinNames = () => ({ version: 1, providers: BUILTINS.map((b) => ({ name: b.name })) });
+
+function resolveProvider(flags, cmd) {
   // `--provider=` (empty) must not fall through to the default chain silently.
   if (flags.provider === true || flags.provider === '') die('--provider needs a value');
   for (const [src, m] of [['--model', flags.model], ['QUICKSILVER_MODEL', process.env.QUICKSILVER_MODEL]]) {
     if (m !== undefined && m !== '' && (typeof m !== 'string' || !MODEL_RE.test(m))) die(`${src} must be a model id (${MODEL_RE.source})`);
   }
   const doc = readProvidersFile();
-  ALL = buildProviders(doc ?? { version: 1, providers: [] }).map(prepare);
+  ALL = buildProviders(doc ?? builtinNames()).map(prepare);
   if (doc) checkFileMode(doc);
   const pin = flags.provider || process.env.QUICKSILVER_PROVIDER;
   PINNED = Boolean(pin);
   if (!pin) { CHAIN = ALL.filter((p) => p.state === 'ready'); return; }
-  const p = ALL.find((x) => x.name === pin);
+  // setup --provider X may add a built-in the file does not name yet (it appends the entry); every other command
+  // treats a name missing from the file as unknown.
+  const b = cmd === 'setup' && !ALL.some((x) => x.name === pin) && BUILTINS.find((x) => x.name === pin);
+  const p = b ? prepare(checkEntry({ ...b }, `built-in provider "${b.name}"`)) : ALL.find((x) => x.name === pin);
   if (!p) die(`unknown provider "${pin}" (configured: ${ALL.map((x) => x.name).join(', ')})`);
   if (!p.enabled) die(`provider "${pin}" is disabled ("enabled" in ${PROVIDERS_FILE}); enable it or pick another provider`);
   CHAIN = [p];
@@ -1139,7 +1146,7 @@ async function verifyKey(p, key) {
 async function cmdSetup({ pos, flags }) {
   const p = PINNED ? CHAIN[0] : ALL.find((x) => x.enabled && x.base_url);
   if (!p) die('no enabled provider with a base_url to set up');
-  const doc = readProvidersFile() ?? { version: 1, providers: BUILTINS.map((b) => ({ name: b.name })) };
+  const doc = readProvidersFile() ?? builtinNames();
   let entry = doc.providers.find((e) => e.name === p.name);
   if (flags.remove) {
     if (!BUILTINS.some((b) => b.name === p.name)) die(`"${p.name}" is not built in, so its api_key cannot be removed; edit it in ${PROVIDERS_FILE}`);
@@ -1326,7 +1333,7 @@ const COMMANDS = Object.fromEntries(Object.entries({ setup: cmdSetup, status: cm
     FLAGS = args.flags;
     MAX_BYTES = flagOrEnv(args.flags, 'max-bytes', 'QUICKSILVER_MAX_BYTES', HARD_MAX_BYTES);
     CHUNK_CHARS = flagOrEnv(args.flags, 'chunk-chars', 'QUICKSILVER_CHUNK_CHARS', CHUNK_CHARS);
-    resolveProvider(args.flags);
+    resolveProvider(args.flags, name);
     return fn(args);
   }]));
 
