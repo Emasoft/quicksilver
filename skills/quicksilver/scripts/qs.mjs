@@ -48,7 +48,26 @@ function parseArgs(argv) {
 }
 
 const die = (msg, code = 1) => { process.stderr.write(`quicksilver: ${msg}\n`); process.exit(code); };
-const num = (v, d) => (v === undefined || v === true ? d : Number(v));
+// Numeric flags are validated once, before any work, by checkNums(): unchecked, NaN or 0 silently broke
+// runs (--concurrency 0 started no workers and printed "(no matches)", --limit abc disabled the cap).
+// [min, max, integer]
+const NUM_FLAGS = {
+  concurrency: [1, Infinity, true], limit: [1, Infinity, true], top: [1, Infinity, true], chunk: [1, Infinity, true],
+  width: [1, Infinity, true], 'max-chars': [1, Infinity, true], 'pack-items': [1, Infinity, true], 'pack-tokens': [1, Infinity, true],
+  threshold: [0, 1], band: [0, 1], 'min-confidence': [0, 1], 'min-score': [0, 1],
+};
+function checkNums(flags) {
+  for (const [name, [min, max, int]] of Object.entries(NUM_FLAGS)) {
+    const v = flags[name];
+    if (v === undefined) continue;
+    const n = v === true || !v.trim() ? NaN : Number(v);
+    if (!Number.isFinite(n) || n < min || n > max || (int && !Number.isInteger(n))) {
+      die(`--${name} needs ${int ? 'a whole number' : 'a number'} ${max === Infinity ? `>= ${min}` : `from ${min} to ${max}`}, got "${v === true ? '' : v}"`);
+    }
+    flags[name] = n;
+  }
+}
+const num = (v, d) => v ?? d; // v is already a checked number (checkNums) or undefined
 const estTokens = (s) => Math.ceil(s.length / 4);
 const rel = (p) => path.relative(process.cwd(), p).split(path.sep).join('/') || '.';
 const clip = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
@@ -688,9 +707,9 @@ USE CASES
   route tickets           classify  │  code in a huge file         find
   yes/no on a long doc    ask       │  best matches for a query    rank`;
 
-// Every command resolves the provider first, from its parsed flags.
+// Every command validates its numeric flags and resolves the provider first, from its parsed flags.
 const COMMANDS = Object.fromEntries(Object.entries({ setup: cmdSetup, status: cmdStatus, filter: cmdFilter, classify: cmdClassify, rank: cmdRank, find: cmdFind, ask: cmdAsk })
-  .map(([name, fn]) => [name, (args) => { resolveProvider(args.flags); return fn(args); }]));
+  .map(([name, fn]) => [name, (args) => { checkNums(args.flags); resolveProvider(args.flags); return fn(args); }]));
 
 process.on('unhandledRejection', (e) => die(`unexpected error: ${e?.stack || e}`, 5));
 process.on('uncaughtException', (e) => die(`unexpected error: ${e?.stack || e}`, 5));
