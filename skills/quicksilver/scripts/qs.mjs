@@ -87,10 +87,14 @@ function readJson(file, fallback) {
   try { return JSON.parse(raw); } catch (e) { return die(`${file} is not valid JSON (${e.message}); fix or delete it`); }
 }
 
-function writeJson(file, obj, mode) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(obj, null, 2) + '\n', { mode });
-  if (mode) try { fs.chmodSync(file, mode); } catch {}
+// The directory holds the API key, so it is created 0700. Writing a fresh temp file and renaming it over the
+// target is atomic (same directory, same filesystem): a crash never leaves a truncated config, and the new
+// file always gets `mode`, which also made the old best-effort chmod of an existing file unnecessary.
+function writeJson(file, obj, mode = 0o600) {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n', { mode });
+  fs.renameSync(tmp, file);
 }
 
 function apiKey() {
@@ -135,7 +139,8 @@ function recordStats(run) {
   s.jev_input_tokens += run.jevTokens;
   s.jev_cost_usd += run.cost;
   s.claude_tokens_saved += Math.max(0, run.saved);
-  try { writeJson(STATS, s); } catch {}
+  // Stats are best-effort, but a failed write is reported, not swallowed.
+  try { writeJson(STATS, s); } catch (e) { process.stderr.write(`quicksilver: warning: could not save ${STATS}: ${e.message}\n`); }
 }
 
 // ---------- HTTP ----------
