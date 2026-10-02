@@ -601,23 +601,82 @@ async function cmdStatus() {
   if (s) console.log(`since ${s.since.slice(0, 10)}: ${s.runs} runs · ${fmtK(s.items)} items judged · jev ${fmtK(s.jev_input_tokens)} tok ($${(s.jev_cost_usd ?? s.jev_input_tokens * PRICE_PER_TOKEN).toFixed(4)}) · ~${fmtK(s.claude_tokens_saved)} Claude tokens not read`);
 }
 
-const HELP = `quicksilver — delegate bulk judgment calls to Jev
+const HELP = `quicksilver: hand bulk yes/no, label, rank and find calls to Jev
 
-  setup [KEY] [--provider openrouter]  save + verify your Jev key (prompts if omitted)
-  status                               check key, show lifetime savings
-  filter "<yes/no question>" <inputs>  keep only items where the answer is yes
-  classify --labels "a,b,c" <inputs>   put each item in one bucket
-  rank "<query>" <inputs> [--top N]    order items by relevance
-  find "<what>" <files> [--top N]      locate the lines in large files that match
-  ask "<question>" --state @file       one-off yes/no (or --choice / --score)
-  ask spec.json                        raw {state, questions} request
+usage: node qs.mjs <command> [args] [options]      (written "qs" below)
 
-inputs: files, directories (respects .gitignore), globs, - (stdin), --items FILE.jsonl
-common: --lines (each line is an item) --ext ts,tsx --json --threshold 0.5 --save FILE
-        --verbose (classify: one line per item) --no-collapse (lines: don't merge repeats)
-        --concurrency 16 --max-chars 60000 --limit 5000 --model NAME (default per provider)
-        --provider typesafe|openrouter
-        --fast (pack small items per request: faster, less accurate)`;
+COMMANDS
+  filter "<yes/no question>" <inputs>   keep the items where the answer is yes
+  classify --labels "a,b,c" <inputs>    put each item under exactly one label
+  rank "<query>" <inputs>               order items by relevance
+  find "<what>" <files>                 locate the matching lines in big files
+  ask "<question>" --state @f|text|-    one judgment over one document
+  ask spec.json|-                       raw {state, questions} request
+  setup [KEY] [--remove]                verify + save a key (prompts if none)
+  status                                check the key, show lifetime savings
+  help, --help, -h                      this screen
+
+INPUTS  files, directories (.gitignore respected), globs (Node 22+), - (stdin),
+        --items FILE.jsonl|- (one {"id","text"} object or plain line each).
+        .env*, keys, certs, credentials never sent; binary or >2 MB skipped.
+
+OPTIONS
+ input    --lines             each non-empty line is an item (logs, lists)
+          --ext ts,tsx        only these file extensions
+          --max-chars 60000   truncate each item (marked ~ in the output)
+          --limit 5000        refuse to run on more items than this
+          --no-secrets-guard  also send secret-looking files
+ output   --json              JSON on stdout, receipt on stderr
+          --save FILE         every per-item result to FILE (filter, classify)
+          --top N | --all     rank: show N (10) or all; find: show N (5)
+          --verbose           classify: every item with its confidence
+          --no-collapse       with --lines: don't merge repeated log patterns
+          --width 160         clip printed item text to this many chars
+ accuracy --threshold 0.5 --band 0.15   filter: yes cutoff; cutoff±band = ?
+          --labels "a:hint,b" classify, ask --choice: text after : is a hint
+          --labels-json J|@f  classify: {"label": "description", ...}
+          --question "..."    classify: ask this instead of "which label?"
+          --min-confidence 0.6  classify: below this is printed as ?
+          --only a,b          classify: print only these labels
+          --min-score 0.05 --chunk 150  find: drop weaker hits; lines/request
+ ask      --state @file|text|-  the content to judge
+          --choice "a,b,c" | --score "low|mid|high"  label or scale, not y/n
+ speed    --concurrency 16    parallel requests
+          --fast              pack small items per request: ~10x faster, less
+                              accurate (obvious needles in huge logs only)
+          --pack-items N --pack-tokens 3000  packing limits (N: 1, --fast 40)
+ provider --provider typesafe|openrouter   default: see ENVIRONMENT
+          --model NAME        default per provider; setup --model saves it
+
+ENVIRONMENT
+  JEV_API_KEY, TYPESAFE_API_KEY  typesafe key (beats the saved key)
+  OPENROUTER_API_KEY    openrouter key; when set, openrouter is the default
+  QUICKSILVER_PROVIDER  typesafe|openrouter, used when --provider is absent
+  QUICKSILVER_MODEL     model, used when --model is absent
+  QUICKSILVER_API_BASE  typesafe-only API base URL (proxies)
+  QUICKSILVER_HOME      config + stats directory (default ~/.quicksilver)
+
+EXIT CODES  0 ok · 1 usage/input error · 3 key missing, rejected or out of
+            credits (re-run setup) · 4 request rejected · 5 request failed
+
+EXAMPLES
+  qs filter "Does this file handle user sessions?" src --ext ts,tsx
+  qs filter "Does this line report a failure (not a warning)?" app.log --lines
+  qs classify --labels "bug,feature,question" --items issues.jsonl --save r.json
+  qs classify --labels "flaky:Intermittent,infra:CI setup,bug:Code" ci-logs/
+  git log --format=%s | qs classify --labels "fix,feat,docs,chore" --lines -
+  qs rank "where do we issue refunds?" src --top 5
+  qs find "the retry backoff logic" huge_module.py --top 3
+  qs ask "Does this contract allow termination without notice?" --state @c.txt
+  qs ask "How severe is this?" --state @incident.md --score "minor|major|fatal"
+  qs filter "Does this file build SQL from user input?" src --json
+  qs status --provider openrouter
+
+USE CASES
+  which files handle X?   filter    │  security review shortlist   filter
+  triage log errors       --lines   │  CI failure triage           classify
+  route tickets           classify  │  code in a huge file         find
+  yes/no on a long doc    ask       │  best matches for a query    rank`;
 
 // Every command resolves the provider first, from its parsed flags.
 const COMMANDS = Object.fromEntries(Object.entries({ setup: cmdSetup, status: cmdStatus, filter: cmdFilter, classify: cmdClassify, rank: cmdRank, find: cmdFind, ask: cmdAsk })
@@ -627,6 +686,7 @@ process.on('unhandledRejection', (e) => die(`unexpected error: ${e?.stack || e}`
 process.on('uncaughtException', (e) => die(`unexpected error: ${e?.stack || e}`, 5));
 
 const [cmd, ...rest] = process.argv.slice(2);
-if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') { console.log(HELP); process.exit(0); }
+// `qs <command> --help` must show help too, not fail on the missing arguments.
+if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h' || rest.includes('--help') || rest.includes('-h')) { console.log(HELP); process.exit(0); }
 if (!COMMANDS[cmd]) die(`unknown command "${cmd}"\n\n${HELP}`);
 await COMMANDS[cmd](parseArgs(rest));

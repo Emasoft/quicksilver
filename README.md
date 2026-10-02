@@ -32,30 +32,49 @@ you ─▶ Claude ──"which files handle auth?"──▶ quicksilver ──�
 ## Install
 
 ```bash
-npx github:UditAkhourii/quicksilver
+curl -fsSL https://raw.githubusercontent.com/Emasoft/quicksilver/main/install-dev.sh | sh
 ```
 
-The installer copies the skill into `~/.claude/skills/quicksilver` and asks for
-your Jev key **once**. Get a key at [console.typesafe.ai](https://console.typesafe.ai).
+The script clones this fork into `~/.local/share/quicksilver` (or fast-forwards
+an existing clone there), copies the skill into `~/.claude/skills/quicksilver`,
+and asks for your Jev key **once**. Get a key at [console.typesafe.ai](https://console.typesafe.ai).
 Then restart Claude Code. That's it. Claude uses the skill on its own whenever
-a task looks like "read a lot to decide a little".
+a task looks like "read a lot to decide a little". Needs git and Node 18+.
+
+```bash
+# use an OpenRouter key instead of a Jev key (arguments after -- go to the installer)
+curl -fsSL https://raw.githubusercontent.com/Emasoft/quicksilver/main/install-dev.sh | sh -s -- --provider openrouter
+
+# keep the clone somewhere else, or only print what the script would do
+curl -fsSL https://raw.githubusercontent.com/Emasoft/quicksilver/main/install-dev.sh | QUICKSILVER_DEV_DIR=~/src/quicksilver sh
+curl -fsSL https://raw.githubusercontent.com/Emasoft/quicksilver/main/install-dev.sh | sh -s -- --dry-run
+```
+
+Piping a script into a shell runs whatever the URL serves: read
+[`install-dev.sh`](install-dev.sh) first, or replace `main` in the URL with a
+commit SHA you reviewed (the script itself still clones the fork's `main`).
+It never resets or deletes the clone: if that folder holds another repository
+or uncommitted changes, it stops. The installed skill is a copy, so after you
+commit changes in the clone, re-run the one-liner to refresh it; with
+uncommitted edits, run `node ~/.local/share/quicksilver/bin/quicksilver.mjs install`.
 
 <details>
 <summary>Other ways to install</summary>
 
 ```bash
-# pass the key non-interactively (CI, dotfiles)
-npx github:UditAkhourii/quicksilver install --key YOUR_JEV_KEY
+# npx: install, or pass the key non-interactively (CI, dotfiles)
+npx github:Emasoft/quicksilver
+npx github:Emasoft/quicksilver install --key YOUR_JEV_KEY
 
 # use an OpenRouter key instead
-npx github:UditAkhourii/quicksilver setup YOUR_OPENROUTER_KEY --provider openrouter
+npx github:Emasoft/quicksilver setup YOUR_OPENROUTER_KEY --provider openrouter
 
 # as a Claude Code plugin
-/plugin marketplace add UditAkhourii/quicksilver
+/plugin marketplace add Emasoft/quicksilver
 /plugin install quicksilver@quicksilver
 
 # from a clone
-git clone https://github.com/UditAkhourii/quicksilver && cd quicksilver && ./install.sh   # or .\install.ps1
+git clone https://github.com/Emasoft/quicksilver && cd quicksilver && ./install.sh   # or .\install.ps1
 ```
 
 `JEV_API_KEY`, `TYPESAFE_API_KEY` or `OPENROUTER_API_KEY` in your environment also works. If `OPENROUTER_API_KEY` is set, Quicksilver uses OpenRouter automatically, even over a saved TypeSafe key; pass `--provider typesafe` (or set `QUICKSILVER_PROVIDER=typesafe`) to keep TypeSafe. Needs Node 18+.
@@ -126,15 +145,34 @@ the same as Claude's. The win there is tokens and context, not speed. Add
 
 ## What Claude can do with it
 
+Claude runs these on its own; you can too. `qs` stands for
+`node ~/.claude/skills/quicksilver/scripts/qs.mjs`, and `qs help` lists every
+command, option, environment variable and exit code.
+
 ```bash
-qs filter   "Does this file handle user sessions?" src           # which files matter
-qs filter   "Does this line report a failure?" app.log --lines    # log triage, repeats collapsed
-qs classify --labels "bug,feature,question" --items issues.jsonl # bulk routing
-qs rank     "where do we issue refunds?" src --top 5              # relevance ranking
-qs find     "the retry backoff logic" huge_module.py              # locate lines in huge files
+qs filter   "Does this file handle user sessions?" src --ext ts,tsx                # which files matter
+qs filter   "Does this line report a failure (not a warning)?" app.log --lines     # log triage, repeats collapsed
+qs classify --labels "bug,feature,question" --items issues.jsonl --save r.json     # bulk routing, full results in r.json
+qs classify --labels "flaky:Intermittent,infra:CI setup,bug:Code" ci-logs/         # labels with a hint after the colon
+git log --format=%s | qs classify --labels "fix,feat,docs,chore" --lines -         # stdin, one item per line
+qs rank     "where do we issue refunds?" src --top 5                                # relevance ranking
+qs find     "the retry backoff logic" huge_module.py --top 3                        # locate lines in a huge file
 qs ask      "Does this contract allow termination without notice?" --state @contract.txt
-qs status                                                          # key check + lifetime tokens saved
+qs ask      "How severe is this?" --state @incident.md --score "minor|major|fatal"  # rate on a scale
+qs filter   "Does this file build SQL from user input?" src --json                  # machine-readable output
+qs status   --provider openrouter                                                   # key check + lifetime tokens saved
 ```
+
+| Use case | Command |
+| --- | --- |
+| Which files handle X? | `qs filter "Does this file handle X?" src` |
+| Triage the errors in a log | `qs filter "Does this line report a failure?" app.log --lines` |
+| Route tickets | `qs classify --labels "billing,bug,account,other" --items tickets.jsonl` |
+| Shortlist files for a security review | `qs filter "Does this file build SQL from user input?" src`, then read the `?` items |
+| CI failure triage | `qs classify --labels "flaky,infra,bug" ci-logs/` |
+| Locate code in a huge file | `qs find "the retry backoff logic" big.js` |
+| A yes/no over a long document | `qs ask "Does it allow X?" --state @doc.md` |
+| Best matches for a query | `qs rank "where do we issue refunds?" src --top 5` |
 
 The output is built for an LLM to read: one line per hit, repeated log patterns
 collapsed into line-number ranges, classify results as id lists, and a `?` on
@@ -158,13 +196,14 @@ a vibe.
 
 - It never sends `.env*`, private keys, certificates, or credentials files. It
   respects `.gitignore`, and skips binaries and files over 2 MB.
-- Content goes to TypeSafe's API (`api.typesafe.ai`) or, with the openrouter
-  provider, through openrouter.ai, whose own data and logging policy then applies. TypeSafe states that Jev
-  is not trained on customer data. Don't point it at anything you can't send to
-  a third party.
-- Exporting `OPENROUTER_API_KEY` routes content and billing through openrouter.ai.
-- The key is stored in `~/.quicksilver/config.json` with user-only permissions.
-  `npx github:UditAkhourii/quicksilver setup --remove` deletes it.
+- Content goes to TypeSafe's API (`api.typesafe.ai`), or through openrouter.ai
+  with the openrouter provider, which is chosen automatically whenever
+  `OPENROUTER_API_KEY` is set; OpenRouter's own data, logging and billing
+  policies then apply. TypeSafe states that Jev is not trained on customer
+  data. Don't point it at anything you can't send to a third party.
+- The key is stored in `~/.quicksilver/config.json` (or `$QUICKSILVER_HOME`)
+  with user-only permissions. `npx github:Emasoft/quicksilver setup --remove`
+  deletes it.
 
 ## FAQ
 

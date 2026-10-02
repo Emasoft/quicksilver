@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // npx installer for the Quicksilver Claude Code skill.
-//   npx github:UditAkhourii/quicksilver            install skill + set Jev key once
-//   npx github:UditAkhourii/quicksilver uninstall  remove the skill
-//   npx github:UditAkhourii/quicksilver <cmd>      run any qs command (status, filter, classify, ...)
+//   npx github:Emasoft/quicksilver            install skill + set Jev key once
+//   npx github:Emasoft/quicksilver uninstall  remove the skill
+//   npx github:Emasoft/quicksilver <cmd>      run any qs command (status, filter, classify, ...)
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -35,9 +35,9 @@ if (cmd === 'install') {
   else if (!ready) {
     if (process.stdin.isTTY) {
       console.log(`\nOne-time setup: paste your Jev API key (create one at ${c('4', 'https://console.typesafe.ai')}), or an OpenRouter key with --provider openrouter (https://openrouter.ai/settings/keys).`);
-      if (run(['setup', ...providerArgs]) !== 0) console.log(`\nNo key saved. Run later: npx github:UditAkhourii/quicksilver setup`);
+      if (run(['setup', ...providerArgs]) !== 0) console.log(`\nNo key saved. Run later: npx github:Emasoft/quicksilver setup`);
     } else {
-      console.log(`\nNext: set your Jev key once →  npx github:UditAkhourii/quicksilver setup   (key from https://console.typesafe.ai; an OpenRouter key works too via --provider openrouter, key from https://openrouter.ai/settings/keys)`);
+      console.log(`\nNext: set your Jev key once →  npx github:Emasoft/quicksilver setup   (key from https://console.typesafe.ai; an OpenRouter key works too via --provider openrouter, key from https://openrouter.ai/settings/keys)`);
     }
   } else run(['status']);
   console.log(`\n${c('32', 'Done.')} Restart Claude Code (or start a new session). Claude now delegates bulk judgment calls to Jev automatically.`);

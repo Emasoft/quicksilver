@@ -38,6 +38,8 @@ Run `qs status` first.
   After setup, carry on with the original task. Don't stop at "configured".
 
 Exit code 3 means a key problem: missing, rejected, or out of credits. Re-run setup.
+Exit code 4 means Jev rejected the request (fix the question or labels); 5 means
+the request failed after retries; 1 is a usage or input error.
 
 ## When to delegate
 
@@ -47,9 +49,11 @@ If yes, and each decision fits yes/no, pick-a-label, or rate-on-a-scale, delegat
 | Situation | Command |
 | --- | --- |
 | "Which files deal with X?" across a repo | `qs filter "Does this file implement or handle X?" src` |
-| Errors or anomalies in a big log | `qs filter "Does this line indicate a failure?" app.log --lines` |
+| Errors or anomalies in a big log | `qs filter "Does this line report a failure (not a warning)?" app.log --lines` |
 | Where in a 5k-line file is Y? | `qs find "Y" big_file.py --top 5` |
 | Sort 200 tickets, test failures, or TODOs into buckets | `qs classify --labels "bug,feature,question" --items items.jsonl` |
+| CI failure triage | `qs classify --labels "flaky:Intermittent,infra:CI setup,bug:Code" ci-logs/` |
+| Shortlist files for a security review | `qs filter "Does this file build SQL from user input?" src`, then read the `?` items |
 | Best candidates for a query (search hits, docs, files) | `qs rank "query" docs/ --top 10` |
 | One yes/no over a large document | `qs ask "Does this contract allow termination without notice?" --state @contract.txt` |
 | Several questions over the same content | `qs ask spec.json` (raw request, see below) |
@@ -73,28 +77,36 @@ shortlist, and check the `?` items yourself.
 
 ## Commands
 
-**Inputs** (for filter, classify, rank): files, directories (respects
+`qs help` prints the full reference: every option, environment variable and exit code.
+
+**Inputs** (filter, classify, rank, find): files, directories (respects
 `.gitignore` inside git repos, and skips `node_modules`, `dist`, and similar),
 globs, `-` for stdin, or `--items FILE.jsonl` (one JSON object per line with
-`id` and `text`, or plain text lines). Add `--lines` to judge each line
-separately (logs, CSVs, lists). Use `--ext ts,tsx` to limit file types.
+`id` and `text`, or plain text lines; `-` reads stdin). Add `--lines` to judge
+each line separately (logs, CSVs, lists). Use `--ext ts,tsx` to limit file types.
+Items longer than `--max-chars 60000` are truncated; more than `--limit 5000`
+items is refused.
 
 ```bash
-qs filter "<yes/no question>" <inputs> [--threshold 0.5] [--lines]
-qs classify --labels "a,b,c" <inputs> [--question "..."] [--only a] [--min-confidence 0.6]
-qs classify --labels-json '{"bug":"Something is broken","feature":"A request for new behaviour"}' <inputs>
+qs filter "<yes/no question>" <inputs> [--threshold 0.5] [--band 0.15] [--lines]
+qs classify --labels "a,b,c" <inputs> [--question "..."] [--only a] [--min-confidence 0.6] [--verbose]
+qs classify --labels "bug:Something is broken,feature:A request for new behaviour" <inputs>
+qs classify --labels-json '{"bug":"Something is broken"}' <inputs>   # or --labels-json @labels.json
 qs rank "<query>" <inputs> [--top 10 | --all]
-qs find "<what you're looking for>" <files> [--top 5]
+qs find "<what you're looking for>" <files> [--top 5] [--min-score 0.05] [--chunk 150]
 qs ask "<question>" --state @file|"text"|- [--choice "a,b,c" | --score "low|mid|high"]
 qs ask spec.json        # {"state": ..., "questions": {"id": {"type": "noul|choice|score", ...}}}
 qs status               # key check, plus lifetime tokens saved
 ```
 
 Add `--json` to any command for machine-readable output. Summary lines go to stderr.
-`--save FILE` writes every per-item result to FILE, while stdout stays compact.
-`--fast` packs small items into shared requests. It's about 10× faster on big logs, but
-less accurate on subtle judgments. Use it for obvious needles (crashes, OOMs) in very
-large logs, not for classification.
+`--save FILE` (filter, classify) writes every per-item result to FILE, while stdout
+stays compact. `--width 160` clips printed item text; `--no-collapse` keeps repeated
+`--lines` patterns separate; `--concurrency 16`, `--provider typesafe|openrouter`
+and `--model NAME` apply everywhere.
+`--fast` packs small items into shared requests (`--pack-items`, `--pack-tokens 3000`).
+It's about 10× faster on big logs, but less accurate on subtle judgments. Use it for
+obvious needles (crashes, OOMs) in very large logs, not for classification.
 
 ## Reading the output
 
@@ -161,5 +173,6 @@ Jev reads questions **literally**. Its accuracy comes from how precise the quest
 - **Batch triage:** dump items to JSONL (issues, test output, grep hits),
   `qs classify`, then act per bucket.
 
-Jev handles 1,200 requests/min. Quicksilver packs small items into shared
-requests, runs 8 in parallel, and retries rate limits (429/529) automatically.
+Jev handles 1,200 requests/min. Quicksilver sends one item per request by default
+(packing measurably hurts accuracy), runs 16 in parallel, and retries rate limits
+(429/529) automatically.
