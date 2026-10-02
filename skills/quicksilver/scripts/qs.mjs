@@ -145,6 +145,7 @@ function recordStats(run) {
 
 // ---------- HTTP ----------
 
+const outOfCredits = () => `${PROVIDER}: out of credits (402). Top up at ${PROVIDERS[PROVIDER].keyUrl.replace(/\/keys$/, '/credits')}`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function http(method, route, body, { retries = 5 } = {}) {
@@ -169,7 +170,7 @@ async function http(method, route, body, { retries = 5 } = {}) {
     const text = await res.text();
     if (res.status === 401 || res.status === 403) die(`${PROVIDER} rejected the API key (${res.status}). Get a new one at ${PROVIDERS[PROVIDER].keyUrl} and run: node qs.mjs setup --provider ${PROVIDER}`, 3);
     // exit 3 = account/key problem the user must fix (SKILL.md contract)
-    if (res.status === 402) die(`${PROVIDER}: out of credits (402). Top up at ${PROVIDERS[PROVIDER].keyUrl.replace(/\/keys$/, '/credits')}`, 3);
+    if (res.status === 402) die(outOfCredits(), 3);
     if (res.status === 422 || res.status === 400) die(`${PROVIDER} rejected the request (${res.status}): ${clip(text, 800)}`, 4);
     lastErr = `HTTP ${res.status}: ${clip(text, 300)}`;
     if (![408, 409, 429, 500, 502, 503, 504, 529].includes(res.status)) break;
@@ -649,7 +650,9 @@ async function cmdSetup({ pos, flags }) {
     const auto = PROVIDER === 'openrouter' && !flags.provider && !process.env.QUICKSILVER_PROVIDER && process.env.OPENROUTER_API_KEY;
     die(`that key was rejected by ${PROVIDER} (${res.status}). Double-check it at ${keyUrl}` + (auto ? ' (OPENROUTER_API_KEY is set, so setup assumed openrouter; for a Jev/TypeSafe key add --provider typesafe)' : ''), 3);
   }
-  if (!res.ok) die(`could not verify key: HTTP ${res.status}`);
+  // Every provider-side refusal is exit 3 (key or account problem, re-run setup), as for normal commands.
+  if (res.status === 402) die(outOfCredits(), 3);
+  if (!res.ok) die(`could not verify the key: ${PROVIDER} answered HTTP ${res.status}`, 3);
   const cfg = readJson(CONFIG, {});
   // A model name saved for the other provider is meaningless here (different id), so drop it.
   if ((cfg.provider || 'typesafe') !== PROVIDER && !flags.model) delete cfg.model;
